@@ -3,6 +3,8 @@ import requests
 import time
 import os
 
+from datetime import datetime
+
 app = Flask(__name__)
 
 ASSEMBLYAI_API_KEY = os.environ.get("ASSEMBLYAI_API_KEY")  # Set this in your environment
@@ -15,6 +17,13 @@ def upload():
 
     audio_file = request.files['audio']
     audio_data = audio_file.read()
+
+    # Save locally for debugging
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"debug_audio_{timestamp}.wav"
+    with open(filename, "wb") as f:
+        f.write(audio_data)
+
 
     # Upload audio to AssemblyAI
     upload_response = requests.post(
@@ -44,8 +53,7 @@ def upload():
         elif result['status'] == 'failed':
             return jsonify({'error': result['error']}), 500
         time.sleep(2)
-        with open("debug_audio.wav", "wb") as f:
-            f.write(audio_data)
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5050)
