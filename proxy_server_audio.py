@@ -20,7 +20,7 @@ def upload():
 
     # Save locally for debugging
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"debug_audio_{timestamp}.wav"
+    filename = f"debug_audio/debug_audio_{timestamp}.wav"
     with open(filename, "wb") as f:
         f.write(audio_data)
 
