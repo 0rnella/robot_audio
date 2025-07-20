@@ -4,15 +4,15 @@
 #include <ArduinoJson.h>
 
 // Wi-Fi credentials
-const char* ssid = "Pixie_n_Friends_ExtraWiFi2G";
-const char* password = "YY8b+CwlQVmW";
+const char* ssid = "pixie";
+const char* password = "ornellaf";
 
 // Proxy server IP + port (adjust to your server)
 const char* server_url = "http://192.168.2.24:5050/upload";
 
 // Button pin
 #define BUTTON_PIN 3
-// #define LED_PIN 8  // Commenting out LED for now
+#define LED_PIN 8  // Built-in LED on many ESP32-C3 boards
 
 // Mic I2S pins (using tested working pins)
 #define I2S_SD 0   // Serial Data
@@ -37,8 +37,8 @@ void setup() {
   
   // Setup pins
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-  // pinMode(LED_PIN, OUTPUT);
-  // digitalWrite(LED_PIN, LOW);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
 
   Serial.println("🤖 AI Robot Starting Up!");
 
@@ -138,15 +138,13 @@ void loop() {
   // Read button state
   bool currentButtonState = digitalRead(BUTTON_PIN);
   
-  // Button pressed (falling edge)
+  // Button pressed (falling edge) - start recording
   if (lastButtonState == HIGH && currentButtonState == LOW) {
     delay(50); // Debounce
-    if (!recording) {
-      startRecording();
-    }
+    startRecording();
   }
   
-  // Button released (rising edge) 
+  // Button released (rising edge) - stop recording
   if (lastButtonState == LOW && currentButtonState == HIGH) {
     delay(50); // Debounce
     if (recording) {
@@ -154,40 +152,64 @@ void loop() {
     }
   }
   
+  // While recording, keep collecting audio data
+  if (recording) {
+    recordAudioData();
+  }
+  
   lastButtonState = currentButtonState;
   delay(10);
 }
 
+// Recording state
+int recording_position = 0;
+
 void startRecording() {
   recording = true;
-  // digitalWrite(LED_PIN, HIGH);
-  Serial.println("🎤 Recording started... Release button when done!");
+  recording_position = 0;
+  digitalWrite(LED_PIN, HIGH);
+  Serial.println("🎤 Recording... Keep button pressed, release when done!");
   
   // Clear the buffer
   memset(audio_buffer, 0, BUFFER_SIZE);
+}
+
+void recordAudioData() {
+  if (!recording) return;
+  
+  // Read a small chunk of audio data
+  const int chunk_size = 512;
+  size_t bytes_read = 0;
+  
+  if (recording_position < BUFFER_SIZE) {
+    int remaining_space = BUFFER_SIZE - recording_position;
+    int read_size = min(chunk_size, remaining_space);
+    
+    i2s_read(I2S_NUM_0, audio_buffer + recording_position, read_size, &bytes_read, 10);
+    recording_position += bytes_read;
+    
+    // If buffer is full, stop recording
+    if (recording_position >= BUFFER_SIZE) {
+      Serial.println("📏 Buffer full! Stopping recording...");
+      stopRecordingAndProcess();
+    }
+  }
 }
 
 void stopRecordingAndProcess() {
   if (!recording) return;
   
   recording = false;
-  Serial.println("🎤 Recording...");
-
-  size_t bytes_read = 0;
-  size_t total_bytes_read = 0;
+  digitalWrite(LED_PIN, LOW);
   
-  // Record audio in chunks
-  while (total_bytes_read < BUFFER_SIZE) {
-    size_t chunk_size = min(BUFFER_SIZE - total_bytes_read, (size_t)2048);
-    i2s_read(I2S_NUM_0, audio_buffer + total_bytes_read, chunk_size, &bytes_read, 1000);
-    total_bytes_read += bytes_read;
-  }
+  Serial.printf("🎤 Recording complete! Recorded %d bytes\n", recording_position);
 
-  // Process audio with gain
+  // Process audio with gain (only process the recorded portion)
   int16_t* samples = (int16_t*)audio_buffer;
+  int sample_count = recording_position / 2;  // 16-bit samples
   float gain = 8.0; // Adjust if too quiet/loud
 
-  for (int i = 0; i < BUFFER_SIZE / 2; i++) {
+  for (int i = 0; i < sample_count; i++) {
     int32_t val = samples[i] * gain;
     if (val > 32767) val = 32767;
     if (val < -32768) val = -32768;
@@ -196,20 +218,19 @@ void stopRecordingAndProcess() {
 
   // Calculate average signal level
   int32_t sum = 0;
-  for (int i = 0; i < BUFFER_SIZE / 2; i++) {
+  for (int i = 0; i < sample_count; i++) {
     sum += abs(samples[i]);
   }
-  int avg_signal = sum / (BUFFER_SIZE / 2);
+  int avg_signal = (sample_count > 0) ? sum / sample_count : 0;
   Serial.printf("🔊 Avg signal level: %d\n", avg_signal);
 
-  // digitalWrite(LED_PIN, LOW);
-  Serial.println("✅ Recording complete! Sending to AI...");
+  Serial.println("✅ Processing complete! Sending to AI...");
 
-  // Send to server
-  sendAudioToServer();
+  // Send to server (use actual recorded size, not full buffer)
+  sendAudioToServer(recording_position);
 }
 
-void sendAudioToServer() {
+void sendAudioToServer(int actual_data_size) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("❌ Wi-Fi not connected!");
     return;
@@ -227,8 +248,8 @@ void sendAudioToServer() {
   String header = "------WebKitFormBoundary\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n";
   String footer = "\r\n------WebKitFormBoundary--\r\n";
 
-  // Calculate required size
-  int bodyLength = header.length() + 44 + BUFFER_SIZE + footer.length();
+  // Calculate required size (use actual recorded data size)
+  int bodyLength = header.length() + 44 + actual_data_size + footer.length();
   Serial.printf("📏 Need %d bytes, have %d bytes free\n", bodyLength, ESP.getFreeHeap());
 
   // Try to allocate memory
@@ -242,9 +263,9 @@ void sendAudioToServer() {
 
   Serial.println("✅ Memory allocated successfully!");
 
-  // WAV header
+  // WAV header (use actual data size)
   uint8_t wav_header[44];
-  writeWAVHeader(wav_header, BUFFER_SIZE, SAMPLE_RATE);
+  writeWAVHeader(wav_header, actual_data_size, SAMPLE_RATE);
 
   // Assemble the request body
   int pos = 0;
@@ -252,8 +273,8 @@ void sendAudioToServer() {
   pos += header.length();
   memcpy(full_body + pos, wav_header, 44); 
   pos += 44;
-  memcpy(full_body + pos, audio_buffer, BUFFER_SIZE); 
-  pos += BUFFER_SIZE;
+  memcpy(full_body + pos, audio_buffer, actual_data_size);  // Only send recorded data
+  pos += actual_data_size;
   memcpy(full_body + pos, footer.c_str(), footer.length());
 
   // Send request
@@ -287,12 +308,12 @@ void processAIResponse(String reply) {
     Serial.println("🤖 AI heard: \"" + transcript + "\"");
     
     // Flash LED to indicate successful transcription
-    // for (int i = 0; i < 3; i++) {
-    //   digitalWrite(LED_PIN, HIGH);
-    //   delay(200);
-    //   digitalWrite(LED_PIN, LOW);
-    //   delay(200);
-    // }
+    for (int i = 0; i < 3; i++) {
+      digitalWrite(LED_PIN, HIGH);
+      delay(200);
+      digitalWrite(LED_PIN, LOW);
+      delay(200);
+    }
     
   } else {
     Serial.println("❌ Failed to parse AI response");
