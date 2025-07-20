@@ -4,15 +4,15 @@
 #include <ArduinoJson.h>
 
 // Wi-Fi credentials
-const char* ssid = "Pixie_n_Friends_Upstairs";
-const char* password = "TastyTr3atz";
+const char* ssid = "Pixie_n_Friends_ExtraWiFi2G";
+const char* password = "YY8b+CwlQVmW";
 
 // Proxy server IP + port (adjust to your server)
-const char* server_url = "http://192.168.2.50:5050/upload";
+const char* server_url = "http://192.168.2.24:5050/upload";
 
 // Button pin
 #define BUTTON_PIN 3
-#define LED_PIN 8  // Built-in LED on many ESP32-C3 boards
+// #define LED_PIN 8  // Commenting out LED for now
 
 // Mic I2S pins (using tested working pins)
 #define I2S_SD 0   // Serial Data
@@ -37,21 +37,54 @@ void setup() {
   
   // Setup pins
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
+  // pinMode(LED_PIN, OUTPUT);
+  // digitalWrite(LED_PIN, LOW);
 
   Serial.println("🤖 AI Robot Starting Up!");
 
   // Connect Wi-Fi
+  Serial.println("📶 Starting Wi-Fi connection...");
+  
+  // Scan for available networks first
+  Serial.println("🔍 Scanning for networks...");
+  WiFi.mode(WIFI_STA);
+  int n = WiFi.scanNetworks();
+  Serial.printf("Found %d networks:\n", n);
+  for (int i = 0; i < n; i++) {
+    Serial.printf("%d: %s (Signal: %d dBm)\n", i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i));
+  }
+  Serial.println("🔍 Scan complete\n");
+  
+  Serial.print("SSID: ");
+  Serial.println(ssid);
+  
   WiFi.begin(ssid, password);
+  
   Serial.print("📶 Connecting to Wi-Fi");
-  while (WiFi.status() != WL_CONNECTED) {
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {  // 10 second timeout
     delay(500); 
     Serial.print(".");
+    attempts++;
+    
+    // Print status every few attempts
+    if (attempts % 4 == 0) {
+      Serial.print(" [Status: ");
+      Serial.print(WiFi.status());
+      Serial.print("]");
+    }
   }
-  Serial.println("\n✅ Wi-Fi connected!");
-  Serial.print("🌐 IP Address: ");
-  Serial.println(WiFi.localIP());
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✅ Wi-Fi connected!");
+    Serial.print("🌐 IP Address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n❌ Wi-Fi connection failed!");
+    Serial.print("Final status: ");
+    Serial.println(WiFi.status());
+    Serial.println("Continuing anyway...");
+  }
 
   // I2S config for ESP32-C3
   const i2s_config_t i2s_config = {
@@ -117,7 +150,7 @@ void loop() {
 
 void startRecording() {
   recording = true;
-  digitalWrite(LED_PIN, HIGH);
+  // digitalWrite(LED_PIN, HIGH);
   Serial.println("🎤 Recording started... Release button when done!");
   
   // Clear the buffer
@@ -159,7 +192,7 @@ void stopRecordingAndProcess() {
   int avg_signal = sum / (BUFFER_SIZE / 2);
   Serial.printf("🔊 Avg signal level: %d\n", avg_signal);
 
-  digitalWrite(LED_PIN, LOW);
+  // digitalWrite(LED_PIN, LOW);
   Serial.println("✅ Recording complete! Sending to AI...");
 
   // Send to server
@@ -221,12 +254,12 @@ void sendAudioToServer() {
       Serial.println("🤖 AI heard: \"" + transcript + "\"");
       
       // Flash LED to indicate successful transcription
-      for (int i = 0; i < 3; i++) {
-        digitalWrite(LED_PIN, HIGH);
-        delay(200);
-        digitalWrite(LED_PIN, LOW);
-        delay(200);
-      }
+      // for (int i = 0; i < 3; i++) {
+      //   digitalWrite(LED_PIN, HIGH);
+      //   delay(200);
+      //   digitalWrite(LED_PIN, LOW);
+      //   delay(200);
+      // }
       
     } else {
       Serial.println("❌ Failed to parse AI response");
