@@ -300,24 +300,46 @@ void sendAudioToServer(int actual_data_size) {
 // Extract response processing to separate function
 void processAIResponse(String reply) {
   // Parse JSON response
-  DynamicJsonDocument doc(1024);
+  DynamicJsonDocument doc(2048);  // Increased size for AI response
   DeserializationError err = deserializeJson(doc, reply);
   
   if (!err && doc.containsKey("text")) {
     String transcript = doc["text"].as<String>();
-    Serial.println("🤖 AI heard: \"" + transcript + "\"");
+    Serial.println("🎤 I heard: \"" + transcript + "\"");
     
-    // Flash LED to indicate successful transcription
-    for (int i = 0; i < 3; i++) {
-      digitalWrite(LED_PIN, HIGH);
-      delay(200);
-      digitalWrite(LED_PIN, LOW);
-      delay(200);
+    // Check if we have an AI response
+    if (doc.containsKey("ai_response")) {
+      String ai_response = doc["ai_response"].as<String>();
+      Serial.println("🤖 Robot says: \"" + ai_response + "\"");
+      
+      // Flash LED to indicate successful AI interaction
+      for (int i = 0; i < 5; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(150);
+        digitalWrite(LED_PIN, LOW);
+        delay(150);
+      }
+    } else {
+      // Just transcription, flash 3 times
+      for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(200);
+        digitalWrite(LED_PIN, LOW);
+        delay(200);
+      }
     }
     
   } else {
     Serial.println("❌ Failed to parse AI response");
     Serial.println("Raw response: " + reply);
+    
+    // Error flash pattern
+    for (int i = 0; i < 2; i++) {
+      digitalWrite(LED_PIN, HIGH);
+      delay(100);
+      digitalWrite(LED_PIN, LOW);
+      delay(100);
+    }
   }
 }
 

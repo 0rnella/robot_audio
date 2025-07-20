@@ -2,12 +2,21 @@ from flask import Flask, request, jsonify
 import requests
 import time
 import os
-
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
 
-ASSEMBLYAI_API_KEY = os.environ.get("ASSEMBLYAI_API_KEY")  # Set this in your environment
+ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Child-friendly robot prompt
+ROBOT_PROMPT = """The following is a message asked by a child between 8 and 12 within the context of a robotics activity. You are a robot created for entertainment purposes. Please answer this message in an entertaining, yet informative way that does not include any profanity and remains age-appropriate. Your response should be short enough to be able to read out within 4 seconds (around 20 words max). Be factual, but friendly!
+
+Child's question: """
 
 # Route to receive audio from ESP32
 @app.route('/upload', methods=['POST'])
@@ -21,40 +30,147 @@ def upload():
     # Save locally for debugging
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"debug_audio/debug_audio_{timestamp}.wav"
+    
+    # Create directory if it doesn't exist
+    os.makedirs("debug_audio", exist_ok=True)
+    
     with open(filename, "wb") as f:
         f.write(audio_data)
+    
+    print(f"🎤 Audio saved: {filename}")
 
-
-    # Upload audio to AssemblyAI
+    # Step 1: Upload audio to AssemblyAI
+    print("🔄 Transcribing audio...")
     upload_response = requests.post(
         'https://api.assemblyai.com/v2/upload',
         headers={'authorization': ASSEMBLYAI_API_KEY},
         data=audio_data
     )
+    
+    if upload_response.status_code != 200:
+        return jsonify({'error': 'Failed to upload audio'}), 500
+    
     upload_url = upload_response.json()['upload_url']
 
-    # Request transcription
+    # Step 2: Request transcription
     transcript_response = requests.post(
         'https://api.assemblyai.com/v2/transcript',
         headers={'authorization': ASSEMBLYAI_API_KEY, 'content-type': 'application/json'},
         json={'audio_url': upload_url}
     )
+    
+    if transcript_response.status_code != 200:
+        return jsonify({'error': 'Failed to request transcription'}), 500
+    
     transcript_id = transcript_response.json()['id']
 
-    # Polling for transcription completion
-    while True:
+    # Step 3: Polling for transcription completion
+    print(f"⏳ Waiting for transcription (ID: {transcript_id})...")
+    max_attempts = 30  # 60 seconds max
+    attempt = 0
+    
+    while attempt < max_attempts:
         polling_response = requests.get(
             f'https://api.assemblyai.com/v2/transcript/{transcript_id}',
             headers={'authorization': ASSEMBLYAI_API_KEY}
         )
+        
+        if polling_response.status_code != 200:
+            return jsonify({'error': 'Failed to check transcription status'}), 500
+        
         result = polling_response.json()
+        
         if result['status'] == 'completed':
-            return jsonify({'text': result['text']})
+            transcript_text = result['text']
+            print(f"✅ Transcription: '{transcript_text}'")
+            
+            # Step 4: Send to ChatGPT for child-friendly response
+            if not transcript_text or transcript_text.strip() == "":
+                return jsonify({
+                    'text': transcript_text or "[No speech detected]",
+                    'ai_response': "I didn't hear anything! Try speaking a bit louder next time!"
+                })
+            
+            try:
+                print("🤖 Generating AI response...")
+                chat_response = get_ai_response(transcript_text)
+                print(f"🎭 AI Response: '{chat_response}'")
+                
+                return jsonify({
+                    'text': transcript_text,
+                    'ai_response': chat_response
+                })
+                
+            except Exception as e:
+                print(f"❌ AI Response Error: {e}")
+                return jsonify({
+                    'text': transcript_text,
+                    'ai_response': "Oops! My robot brain is having trouble right now. Try asking me again!"
+                })
+            
         elif result['status'] == 'failed':
             return jsonify({'error': result['error']}), 500
+        
         time.sleep(2)
+        attempt += 1
+    
+    return jsonify({'error': 'Transcription timeout'}), 500
 
+def get_ai_response(user_question):
+    """Get child-friendly response from OpenAI"""
+    if not OPENAI_API_KEY:
+        return "Sorry! I need my AI brain to be connected to answer questions."
+    
+    try:
+        response = requests.post(
+            'https://api.openai.com/v1/chat/completions',
+            headers={
+                'Authorization': f'Bearer {OPENAI_API_KEY}',
+                'Content-Type': 'application/json'
+            },
+            json={
+                'model': 'gpt-3.5-turbo',  # You can change to gpt-4 if you prefer
+                'messages': [
+                    {
+                        'role': 'system',
+                        'content': ROBOT_PROMPT
+                    },
+                    {
+                        'role': 'user', 
+                        'content': user_question
+                    }
+                ],
+                'max_tokens': 80,  # Keep responses short
+                'temperature': 0.8  # Make it fun and creative
+            },
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            ai_text = response.json()['choices'][0]['message']['content'].strip()
+            return ai_text
+        else:
+            print(f"OpenAI API Error: {response.status_code} - {response.text}")
+            return "My robot circuits are a bit confused right now! Ask me something else!"
+            
+    except requests.exceptions.Timeout:
+        return "I'm thinking too hard! Ask me again!"
+    except Exception as e:
+        print(f"AI Error: {e}")
+        return "Beep boop! Something went wrong in my robot brain!"
+
+# Health check endpoint
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({'status': 'Robot server is running! 🤖'})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5050)
-
+    # Check if API keys are set
+    if not ASSEMBLYAI_API_KEY:
+        print("⚠️  WARNING: ASSEMBLYAI_API_KEY environment variable not set!")
+    if not OPENAI_API_KEY:
+        print("⚠️  WARNING: OPENAI_API_KEY environment variable not set!")
+    
+    print("🤖 Starting AI Robot Server...")
+    print("🎤 Ready to receive audio and chat with kids!")
+    app.run(host='0.0.0.0', port=5050, debug=True)
