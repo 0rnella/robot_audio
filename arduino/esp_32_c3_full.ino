@@ -21,7 +21,7 @@ const char* server_url = "http://192.168.2.24:5050/upload";
 
 // Recording settings
 #define SAMPLE_RATE     16000
-#define RECORD_SECONDS  3      // 3 seconds should be good for questions
+#define RECORD_SECONDS  2      // Reduce to 2 seconds to save memory
 #define SAMPLE_SIZE     2      // 16-bit
 #define BUFFER_SIZE     (SAMPLE_RATE * RECORD_SECONDS * SAMPLE_SIZE)
 
@@ -45,9 +45,15 @@ void setup() {
   // Connect Wi-Fi
   Serial.println("📶 Starting Wi-Fi connection...");
   
+  // More aggressive Wi-Fi setup for ESP32-C3
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  
   // Scan for available networks first
   Serial.println("🔍 Scanning for networks...");
-  WiFi.mode(WIFI_STA);
   int n = WiFi.scanNetworks();
   Serial.printf("Found %d networks:\n", n);
   for (int i = 0; i < n; i++) {
@@ -59,6 +65,10 @@ void setup() {
   Serial.println(ssid);
   
   WiFi.begin(ssid, password);
+  
+  // Try additional ESP32-specific settings
+  WiFi.setHostname("ESP32-Robot");
+  delay(1000);
   
   Serial.print("📶 Connecting to Wi-Fi");
   int attempts = 0;
@@ -205,6 +215,9 @@ void sendAudioToServer() {
     return;
   }
 
+  // Check available heap memory
+  Serial.printf("🧠 Free heap: %d bytes\n", ESP.getFreeHeap());
+
   WiFiClient client;
   HTTPClient http;
   http.begin(client, server_url);
@@ -214,14 +227,20 @@ void sendAudioToServer() {
   String header = "------WebKitFormBoundary\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n";
   String footer = "\r\n------WebKitFormBoundary--\r\n";
 
-  // Create WAV file
+  // Calculate required size
   int bodyLength = header.length() + 44 + BUFFER_SIZE + footer.length();
+  Serial.printf("📏 Need %d bytes, have %d bytes free\n", bodyLength, ESP.getFreeHeap());
+
+  // Try to allocate memory
   uint8_t* full_body = (uint8_t*)malloc(bodyLength);
   
   if (!full_body) {
-    Serial.println("❌ Failed to allocate memory!");
+    Serial.println("❌ Not enough memory! Try reducing RECORD_SECONDS or reboot ESP32.");
+    http.end();
     return;
   }
+
+  Serial.println("✅ Memory allocated successfully!");
 
   // WAV header
   uint8_t wav_header[44];
@@ -245,26 +264,7 @@ void sendAudioToServer() {
   Serial.printf("📬 Response code: %d\n", responseCode);
   
   if (responseCode == 200) {
-    // Parse JSON response
-    DynamicJsonDocument doc(1024);
-    DeserializationError err = deserializeJson(doc, reply);
-    
-    if (!err && doc.containsKey("text")) {
-      String transcript = doc["text"].as<String>();
-      Serial.println("🤖 AI heard: \"" + transcript + "\"");
-      
-      // Flash LED to indicate successful transcription
-      // for (int i = 0; i < 3; i++) {
-      //   digitalWrite(LED_PIN, HIGH);
-      //   delay(200);
-      //   digitalWrite(LED_PIN, LOW);
-      //   delay(200);
-      // }
-      
-    } else {
-      Serial.println("❌ Failed to parse AI response");
-      Serial.println("Raw response: " + reply);
-    }
+    processAIResponse(reply);
   } else {
     Serial.println("❌ Failed to send audio to server");
     Serial.println("Response: " + reply);
@@ -274,6 +274,30 @@ void sendAudioToServer() {
   http.end();
   
   Serial.println("🔘 Ready for next question! Press button to record.");
+}
+
+// Extract response processing to separate function
+void processAIResponse(String reply) {
+  // Parse JSON response
+  DynamicJsonDocument doc(1024);
+  DeserializationError err = deserializeJson(doc, reply);
+  
+  if (!err && doc.containsKey("text")) {
+    String transcript = doc["text"].as<String>();
+    Serial.println("🤖 AI heard: \"" + transcript + "\"");
+    
+    // Flash LED to indicate successful transcription
+    // for (int i = 0; i < 3; i++) {
+    //   digitalWrite(LED_PIN, HIGH);
+    //   delay(200);
+    //   digitalWrite(LED_PIN, LOW);
+    //   delay(200);
+    // }
+    
+  } else {
+    Serial.println("❌ Failed to parse AI response");
+    Serial.println("Raw response: " + reply);
+  }
 }
 
 // Create WAV header for the audio data
