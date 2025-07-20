@@ -10,7 +10,7 @@ i2s_config_t i2s_config = {
   .sample_rate = SAMPLE_RATE,
   .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
   .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-  .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+  .communication_format = I2S_COMM_FORMAT_STAND_I2S,
   .intr_alloc_flags = 0,
   .dma_buf_count = 4,
   .dma_buf_len = 512,
@@ -60,6 +60,11 @@ void loop() {
   if (result == ESP_OK && bytes_read > 0) {
     size_t sample_count = bytes_read / sizeof(int16_t);
     long sum = 0;
+    // Add this after reading samples, before calculating average:
+    for (size_t i = 0; i < sample_count; i++) {
+      // Simple high-pass filter to remove DC offset
+      samples[i] = samples[i] - 2048; // Adjust DC offset if needed
+    }
 
     for (size_t i = 0; i < sample_count; i++) {
       sum += abs(samples[i]);
