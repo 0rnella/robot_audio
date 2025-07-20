@@ -1,3 +1,4 @@
 debug_audio/*
 myrobot-env/*
+audio_responses/*
 .env

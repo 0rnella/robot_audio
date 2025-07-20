@@ -2,6 +2,9 @@
 #include <HTTPClient.h>
 #include <driver/i2s.h>
 #include <ArduinoJson.h>
+#include "AudioFileSourceHTTPStream.h"
+#include "AudioGeneratorMP3.h"
+#include "AudioOutputI2S.h"
 
 // Wi-Fi credentials
 const char* ssid = "pixie";
@@ -13,6 +16,9 @@ const char* server_url = "http://192.168.2.24:5050/upload";
 // Button pin
 #define BUTTON_PIN 3
 #define LED_PIN 8  // Built-in LED on many ESP32-C3 boards
+
+// Simple wiring setup
+#define AUDIO_OUT_PIN 9  // DAC output to PAM8403 L+ input
 
 // Mic I2S pins (using tested working pins)
 #define I2S_SD 0   // Serial Data
@@ -38,6 +44,7 @@ void setup() {
   // Setup pins
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
+  pinMode(AUDIO_OUT_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
   Serial.println("🤖 AI Robot Starting Up!");
@@ -243,7 +250,7 @@ void sendAudioToServer(int actual_data_size) {
   HTTPClient http;
   http.begin(client, server_url);
   http.addHeader("Content-Type", "multipart/form-data; boundary=----WebKitFormBoundary");
-  http.setTimeout(30000); // 30 second timeout
+  http.setTimeout(60000); // Increase to 60 seconds for TTS processing
 
   String header = "------WebKitFormBoundary\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n";
   String footer = "\r\n------WebKitFormBoundary--\r\n";
@@ -277,8 +284,14 @@ void sendAudioToServer(int actual_data_size) {
   pos += actual_data_size;
   memcpy(full_body + pos, footer.c_str(), footer.length());
 
+  // Play "thinking" message before sending
+  Serial.println("🤔 Thinking...");
+
   // Send request
   Serial.println("📤 Sending audio to AI server...");
+  Serial.println("⏳ This may take 10-20 seconds for transcription + TTS...");
+  
+  // Send the request (this will block)
   int responseCode = http.POST(full_body, bodyLength);
   String reply = http.getString();
   
@@ -312,6 +325,20 @@ void processAIResponse(String reply) {
       String ai_response = doc["ai_response"].as<String>();
       Serial.println("🤖 Robot says: \"" + ai_response + "\"");
       
+      // Check if there's audio to play
+      if (doc.containsKey("has_audio") && doc["has_audio"] == true) {
+        String audio_url = doc["audio_url"].as<String>();
+        String full_audio_url = String(server_url).substring(0, String(server_url).lastIndexOf('/')) + audio_url;
+        
+        Serial.println("🔗 Audio URL from server: " + audio_url);
+        Serial.println("🔗 Full URL: " + full_audio_url);
+        Serial.println("🔗 Server base: " + String(server_url));
+        
+        playAudioFromURL(full_audio_url);
+      } else {
+        Serial.println("📝 No audio available, showing text only");
+      }
+      
       // Flash LED to indicate successful AI interaction
       for (int i = 0; i < 5; i++) {
         digitalWrite(LED_PIN, HIGH);
@@ -320,27 +347,250 @@ void processAIResponse(String reply) {
         delay(150);
       }
     } else {
-      // Just transcription, flash 3 times
-      for (int i = 0; i < 3; i++) {
-        digitalWrite(LED_PIN, HIGH);
-        delay(200);
-        digitalWrite(LED_PIN, LOW);
-        delay(200);
-      }
+      // Just transcription
+      Serial.println("📝 Transcription only");
     }
     
   } else {
     Serial.println("❌ Failed to parse AI response");
     Serial.println("Raw response: " + reply);
-    
-    // Error flash pattern
-    for (int i = 0; i < 2; i++) {
-      digitalWrite(LED_PIN, HIGH);
-      delay(100);
-      digitalWrite(LED_PIN, LOW);
-      delay(100);
-    }
   }
+}
+
+// Download and play WAV audio using PWM
+void playAudioFromURL(String url) {
+  Serial.println("🔊 Downloading WAV audio from OpenAI...");
+  
+  // Ensure silence first
+  noTone(AUDIO_OUT_PIN);
+  digitalWrite(AUDIO_OUT_PIN, LOW);
+  delay(200);
+  
+  WiFiClient client;
+  HTTPClient http;
+  http.begin(client, url);
+  
+  int httpCode = http.GET();
+  if (httpCode == HTTP_CODE_OK) {
+    Serial.printf("✅ HTTP Success, Content-Length: %d bytes\n", http.getSize());
+    
+    WiFiClient* stream = http.getStreamPtr();
+    
+    // Read enough bytes to find the actual header structure
+    uint8_t header[100];
+    int headerBytesRead = stream->readBytes(header, 100);
+    
+    // Find the "fmt " chunk to get audio format info
+    int fmtPos = -1;
+    for (int i = 0; i < headerBytesRead - 4; i++) {
+      if (header[i] == 'f' && header[i+1] == 'm' && header[i+2] == 't' && header[i+3] == ' ') {
+        fmtPos = i;
+        break;
+      }
+    }
+    
+    if (fmtPos == -1) {
+      Serial.println("❌ Couldn't find fmt chunk!");
+      http.end();
+      return;
+    }
+    
+    Serial.printf("📄 Found fmt chunk at position %d\n", fmtPos);
+    
+    // Parse format chunk (starts 8 bytes after "fmt ")
+    int formatStart = fmtPos + 8;
+    uint16_t audioFormat = header[formatStart] | (header[formatStart+1] << 8);
+    uint16_t numChannels = header[formatStart+2] | (header[formatStart+3] << 8);
+    uint32_t sampleRate = header[formatStart+4] | (header[formatStart+5] << 8) | 
+                         (header[formatStart+6] << 16) | (header[formatStart+7] << 24);
+    uint32_t byteRate = header[formatStart+8] | (header[formatStart+9] << 8) | 
+                       (header[formatStart+10] << 16) | (header[formatStart+11] << 24);
+    uint16_t blockAlign = header[formatStart+12] | (header[formatStart+13] << 8);
+    uint16_t bitsPerSample = header[formatStart+14] | (header[formatStart+15] << 8);
+    
+    // Debug the raw bytes being parsed
+    Serial.printf("🔍 Format bytes at pos %d: ", formatStart);
+    for (int i = 0; i < 16; i++) {
+      Serial.printf("%02X ", header[formatStart + i]);
+    }
+    Serial.println();
+    
+    // Print actual format info
+    Serial.printf("📊 Audio format: %d (1=PCM)\n", audioFormat);
+    Serial.printf("📊 Channels: %d\n", numChannels);
+    Serial.printf("📊 Sample rate: %d Hz\n", sampleRate);
+    Serial.printf("📊 Byte rate: %d bytes/sec\n", byteRate);
+    Serial.printf("📊 Block align: %d bytes\n", blockAlign);
+    Serial.printf("📊 Bits per sample: %d\n", bitsPerSample);
+    
+    // Find "data" chunk
+    int dataPos = -1;
+    for (int i = fmtPos; i < headerBytesRead - 4; i++) {
+      if (header[i] == 'd' && header[i+1] == 'a' && header[i+2] == 't' && header[i+3] == 'a') {
+        dataPos = i;
+        break;
+      }
+    }
+    
+    if (dataPos == -1) {
+      Serial.println("❌ Couldn't find data chunk!");
+      http.end();
+      return;
+    }
+    
+    Serial.printf("📄 Found data chunk at position %d\n", dataPos);
+    
+    // Data size is 4 bytes after "data"
+    uint32_t dataSize = header[dataPos+4] | (header[dataPos+5] << 8) | 
+                       (header[dataPos+6] << 16) | (header[dataPos+7] << 24);
+    
+    // Debug the data size bytes
+    Serial.printf("🔍 Data size bytes at pos %d: %02X %02X %02X %02X\n", 
+                  dataPos+4, header[dataPos+4], header[dataPos+5], header[dataPos+6], header[dataPos+7]);
+    
+    Serial.printf("📊 Data size: %d bytes (0x%08X)\n", dataSize, dataSize);
+    
+    // Sanity check - if data size is crazy, try to use file size instead
+    if (dataSize > 1000000 || dataSize == 0) {
+      Serial.println("❌ Data size looks wrong! Using HTTP content length instead.");
+      dataSize = http.getSize() - 44; // Approximate: total size minus header
+      Serial.printf("📊 Using estimated data size: %d bytes\n", dataSize);
+    }
+    
+    // Audio data starts 8 bytes after "data"
+    int audioDataStart = dataPos + 8;
+    Serial.printf("📄 Audio data starts at byte %d\n", audioDataStart);
+    
+    // Calculate timing
+    uint32_t samplePeriodMicros = 1000000 / sampleRate;
+    float expectedDuration = (float)dataSize / (float)byteRate;
+    Serial.printf("📊 Expected duration: %.2f seconds\n", expectedDuration);
+    Serial.printf("⏱️ Sample period: %d microseconds\n", samplePeriodMicros);
+    
+    // Use streaming with small buffer instead of loading everything to memory
+    Serial.println("🎵 Streaming audio with small buffer...");
+    
+    // Skip any remaining header bytes
+    int bytesToSkip = audioDataStart - headerBytesRead;
+    if (bytesToSkip > 0) {
+      uint8_t skipBuffer[bytesToSkip];
+      stream->readBytes(skipBuffer, bytesToSkip);
+      Serial.printf("📄 Skipped %d additional header bytes\n", bytesToSkip);
+    }
+    
+    // Play any audio data from the original header read
+    int sampleCount = 0;
+    unsigned long startMicros = micros();
+    unsigned long playbackStart = millis();
+    
+    if (bytesToSkip < 0) {
+      int audioFromHeader = headerBytesRead - audioDataStart;
+      Serial.printf("📄 Playing %d audio bytes from header\n", audioFromHeader);
+      
+      for (int i = audioDataStart; i < headerBytesRead; i += 2) {
+        if (i + 1 < headerBytesRead) {
+          int16_t sample = header[i] | (header[i+1] << 8);
+          uint8_t pwmValue = map(sample, -32768, 32767, 100, 155);
+          
+          // Precise timing
+          unsigned long targetTime = startMicros + (sampleCount * samplePeriodMicros);
+          while (micros() < targetTime) { /* wait */ }
+          
+          analogWrite(AUDIO_OUT_PIN, pwmValue);
+          sampleCount++;
+        }
+      }
+    }
+    
+    // Stream the rest with overlapped download/playback
+    uint8_t buffer1[256];
+    uint8_t buffer2[256];
+    bool useBuffer1 = true;
+    
+    // Download first chunk
+    int bytesRead1 = stream->readBytes(buffer1, sizeof(buffer1));
+    Serial.printf("📥 Downloaded first chunk: %d bytes\n", bytesRead1);
+    
+    int totalBytesProcessed = 0;
+    
+    while (bytesRead1 > 0) {
+      uint8_t* currentBuffer = useBuffer1 ? buffer1 : buffer2;
+      int currentBytes = bytesRead1;
+      
+      Serial.printf("📦 Processing chunk: %d bytes\n", currentBytes);
+      
+      // Start downloading next chunk while playing current one
+      int nextBytes = 0;
+      if (http.connected()) {
+        uint8_t* nextBuffer = useBuffer1 ? buffer2 : buffer1;
+        nextBytes = stream->readBytes(nextBuffer, 256);
+      }
+      
+      // Play current buffer
+      for (int i = 0; i < currentBytes; i += 2) {
+        if (i + 1 < currentBytes) {
+          int16_t sample = currentBuffer[i] | (currentBuffer[i+1] << 8);
+          
+          // Much more sensitive PWM mapping for small audio values
+          uint8_t pwmValue;
+          if (abs(sample) < 20) {
+            // For very quiet samples (silence), use true middle value
+            pwmValue = 127;
+          } else {
+            pwmValue = map(sample, -2000, 2000, 80, 175);
+            pwmValue = constrain(pwmValue, 80, 175);
+          }
+          
+          // Force debug for first few samples of each chunk
+          if (totalBytesProcessed < 1000 && (sampleCount % 10) == 0) {
+            Serial.printf("🔍 Sample %d: raw=%d, pwm=%d\n", sampleCount, sample, pwmValue);
+          }
+          
+          // FASTER timing - skip some waits to speed up playback
+          unsigned long targetTime = startMicros + (sampleCount * (samplePeriodMicros * 7 / 12)); // ~0.58x speed
+          if (micros() < targetTime) {
+            while (micros() < targetTime) { /* wait */ }
+          }
+          
+          analogWrite(AUDIO_OUT_PIN, pwmValue);
+          sampleCount++;
+        }
+      }
+      
+      totalBytesProcessed += currentBytes;
+      
+      // Switch buffers
+      useBuffer1 = !useBuffer1;
+      bytesRead1 = nextBytes;
+    }
+    
+    Serial.printf("📊 Total bytes processed: %d\n", totalBytesProcessed);
+    
+    unsigned long playbackEnd = millis();
+    float actualTime = (playbackEnd - playbackStart) / 1000.0;
+    Serial.printf("✅ Played %d samples in %.2f seconds\n", sampleCount, actualTime);
+    Serial.printf("📊 Expected: %.2f sec, Actual: %.2f sec\n", expectedDuration, actualTime);
+    
+  } else {
+    Serial.printf("❌ HTTP Error: %d\n", httpCode);
+  }
+  
+  http.end();
+  
+  // FORCE complete silence for the dog!
+  Serial.println("🔇 Forcing complete silence...");
+  noTone(AUDIO_OUT_PIN);           // Stop any tone generation
+  analogWrite(AUDIO_OUT_PIN, 0);   // Set PWM to 0
+  delay(100);
+  digitalWrite(AUDIO_OUT_PIN, LOW); // Set pin to digital LOW
+  delay(100);
+  
+  // Triple check silence
+  pinMode(AUDIO_OUT_PIN, OUTPUT);
+  digitalWrite(AUDIO_OUT_PIN, LOW);
+  
+  Serial.println("🔇 Pin forced to LOW - should be completely silent now");
+  Serial.println("🐕 Dog-safe mode activated!");
 }
 
 // Create WAV header for the audio data

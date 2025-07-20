@@ -221,13 +221,27 @@ def text_to_speech(text, timestamp):
 @app.route('/audio/<filename>')
 def serve_audio(filename):
     try:
+        file_path = f"audio_responses/{filename}"
+        print(f"🎵 Serving audio file: {file_path}")
+        
+        # Check if file exists
+        if not os.path.exists(file_path):
+            print(f"❌ Audio file not found: {file_path}")
+            return jsonify({'error': 'Audio file not found'}), 404
+        
+        # Log file info
+        file_size = os.path.getsize(file_path)
+        print(f"📏 Serving file size: {file_size} bytes")
+        
         # Determine MIME type based on extension
         if filename.endswith('.wav'):
-            return send_file(f"audio_responses/{filename}", mimetype='audio/wav')
+            print("📄 Serving as WAV file")
+            return send_file(file_path, mimetype='audio/wav')
         else:
-            return send_file(f"audio_responses/{filename}", mimetype='audio/mpeg')
+            print("📄 Serving as MP3 file")
+            return send_file(file_path, mimetype='audio/mpeg')
     except Exception as e:
-        print(f"Error serving audio: {e}")
+        print(f"❌ Error serving audio: {e}")
         return jsonify({'error': 'Audio file not found'}), 404
 
 # Health check endpoint
