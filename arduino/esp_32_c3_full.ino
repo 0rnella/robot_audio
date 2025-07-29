@@ -146,27 +146,27 @@ void setupMicrophoneI2S() {
   Serial.println("✅ Microphone I2S initialized!");
 }
 
-void setupAudioI2S(uint32_t sampleRate = 24000) {
+void setupAudioI2S(uint32_t sampleRate = 16000) {  // Default to 16kHz
   // Uninstall microphone I2S first
   esp_err_t err = i2s_driver_uninstall(I2S_NUM_0);
   if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
     Serial.printf("⚠️ Audio I2S uninstall warning: %d\n", err);
   }
   
-  delay(100); // Give it time to clean up
+  delay(200); // Give it more time to clean up
   
   Serial.printf("🔧 Setting up I2S for %d Hz playback\n", sampleRate);
   
-  // I2S config for audio output (MAX98357A)
+  // Very conservative I2S config for ESP32-C3
   i2s_config_t i2s_config = {
     .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_TX),
-    .sample_rate = sampleRate,  // Use actual WAV sample rate
+    .sample_rate = sampleRate,  // Keep the original sample rate
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,  // Mono output for better performance
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = 0,
-    .dma_buf_count = 8,
-    .dma_buf_len = 512,
+    .dma_buf_count = 8,    // More buffers for smoother playback
+    .dma_buf_len = 256,    // Smaller buffers for ESP32-C3
     .use_apll = false,
     .tx_desc_auto_clear = true,
     .fixed_mclk = 0
@@ -191,7 +191,7 @@ void setupAudioI2S(uint32_t sampleRate = 24000) {
     return;
   }
 
-  Serial.println("✅ Audio I2S initialized!");
+  Serial.println("✅ Conservative audio I2S initialized!");
 }
 
 void loop() {
@@ -425,13 +425,14 @@ void processAIResponse(String reply) {
   }
 }
 
-// Play audio using MAX98357A I2S amplifier
+// Buffered audio playback - read ahead, play in small chunks
 void playAudioFromURL(String url) {
-  Serial.println("🔊 Downloading and playing WAV audio...");
+  Serial.println("🔊 Buffered audio streaming...");
   
   WiFiClient client;
   HTTPClient http;
   http.begin(client, url);
+  http.setTimeout(30000);
   
   int httpCode = http.GET();
   if (httpCode == HTTP_CODE_OK) {
@@ -439,122 +440,108 @@ void playAudioFromURL(String url) {
     
     WiFiClient* stream = http.getStreamPtr();
     
-    // Read enough bytes to parse WAV header
-    uint8_t header[100];
-    int headerBytesRead = stream->readBytes(header, 100);
+    // Skip WAV header - we know it's 44 bytes for our files
+    uint8_t header[44];
+    stream->readBytes(header, 44);
     
-    // Parse WAV header to get audio parameters
-    if (header[0] != 'R' || header[1] != 'I' || header[2] != 'F' || header[3] != 'F') {
-      Serial.println("❌ Not a valid WAV file!");
-      http.end();
-      return;
+    // Get audio parameters from header
+    uint16_t numChannels = header[22] | (header[23] << 8);
+    uint32_t sampleRate = header[24] | (header[25] << 8) | (header[26] << 16) | (header[27] << 24);
+    uint16_t bitsPerSample = header[34] | (header[35] << 8);
+    
+    uint32_t dataSize = http.getSize() - 44;  // Remaining data after header
+    
+    Serial.printf("📊 %d ch, %d Hz, %d-bit, %u bytes audio data\n", 
+                  numChannels, sampleRate, bitsPerSample, dataSize);
+    Serial.printf("📊 Expected duration: %.2f seconds\n", 
+                  (float)dataSize / (sampleRate * numChannels * (bitsPerSample/8)));
+    
+    // Setup I2S with MUCH lower sample rate for ESP32-C3
+    uint32_t playbackRate = min((uint32_t)sampleRate, (uint32_t)16000);  // Cap at 16kHz
+    if (playbackRate != sampleRate) {
+      Serial.printf("🔽 Reducing playback rate from %d to %d Hz\n", sampleRate, playbackRate);
     }
     
-    // Find fmt chunk
-    int fmtPos = -1;
-    for (int i = 0; i < headerBytesRead - 4; i++) {
-      if (header[i] == 'f' && header[i+1] == 'm' && header[i+2] == 't' && header[i+3] == ' ') {
-        fmtPos = i;
-        break;
-      }
-    }
+    setupAudioI2S(playbackRate);
     
-    if (fmtPos == -1) {
-      Serial.println("❌ Couldn't find fmt chunk!");
-      http.end();
-      return;
-    }
+    Serial.println("🎵 Starting buffered playback...");
     
-    // Parse audio format
-    int formatStart = fmtPos + 8;
-    uint16_t audioFormat = header[formatStart] | (header[formatStart+1] << 8);
-    uint16_t numChannels = header[formatStart+2] | (header[formatStart+3] << 8);
-    uint32_t sampleRate = header[formatStart+4] | (header[formatStart+5] << 8) | 
-                         (header[formatStart+6] << 16) | (header[formatStart+7] << 24);
-    uint16_t bitsPerSample = header[formatStart+14] | (header[formatStart+15] << 8);
+    // Use very small chunks that ESP32-C3 can handle
+    const size_t CHUNK_SIZE = 128;  // Tiny chunks
+    uint8_t audioBuffer[CHUNK_SIZE];
     
-    Serial.printf("📊 Audio format: %d (1=PCM)\n", audioFormat);
-    Serial.printf("📊 Channels: %d, Sample rate: %d Hz, Bits: %d\n", numChannels, sampleRate, bitsPerSample);
+    size_t totalRead = 0;
+    size_t totalPlayed = 0;
+    unsigned long startTime = millis();
     
-    // Find data chunk and get size
-    int dataPos = -1;
-    for (int i = fmtPos; i < headerBytesRead - 4; i++) {
-      if (header[i] == 'd' && header[i+1] == 'a' && header[i+2] == 't' && header[i+3] == 'a') {
-        dataPos = i;
-        break;
-      }
-    }
-    
-    if (dataPos == -1) {
-      Serial.println("❌ Couldn't find data chunk!");
-      http.end();
-      return;
-    }
-    
-    uint32_t dataSize = header[dataPos+4] | (header[dataPos+5] << 8) | 
-                       (header[dataPos+6] << 16) | (header[dataPos+7] << 24);
-    Serial.printf("📊 Data size: %d bytes (%.2f seconds expected)\n", dataSize, (float)dataSize / (sampleRate * numChannels * 2));
-    
-    // Setup I2S for audio output with matching sample rate
-    setupAudioI2S(sampleRate);
-    
-    Serial.println("🎵 Playing audio through MAX98357A...");
-    
-    // Skip to audio data
-    int audioDataStart = dataPos + 8;
-    int bytesToSkip = audioDataStart - headerBytesRead;
-    if (bytesToSkip > 0) {
-      uint8_t skipBuffer[bytesToSkip];
-      stream->readBytes(skipBuffer, bytesToSkip);
-    }
-    
-    // Stream and play audio data
-    uint8_t buffer[1024];  // Larger buffer for better streaming
-    size_t bytesRead;
-    size_t totalSamples = 0;
-    size_t totalBytesStreamed = 0;
-    unsigned long playbackStart = millis();
-    
-    Serial.println("🎵 Starting audio stream...");
-    
-    while (http.connected() && (bytesRead = stream->readBytes(buffer, sizeof(buffer))) > 0) {
-      // Write directly to I2S
-      size_t bytes_written = 0;
-      esp_err_t result = i2s_write(I2S_NUM_0, buffer, bytesRead, &bytes_written, 1000);
+    while (http.connected() && totalRead < dataSize) {
+      // Read a small chunk
+      size_t toRead = min((size_t)CHUNK_SIZE, (size_t)(dataSize - totalRead));
+      size_t bytesRead = stream->readBytes(audioBuffer, toRead);
       
-      if (result != ESP_OK) {
-        Serial.printf("❌ I2S write error: %d\n", result);
+      if (bytesRead == 0) {
+        Serial.println("⚠️ No more data from stream");
         break;
       }
       
-      totalBytesStreamed += bytes_written;
-      totalSamples += bytes_written / 2; // 16-bit samples
+      totalRead += bytesRead;
       
-      // Debug every 10KB
-      if ((totalBytesStreamed % 10240) == 0) {
-        Serial.printf("📊 Streamed %d bytes, %d samples\n", totalBytesStreamed, totalSamples);
+      // Try to play this chunk with very aggressive timeout management
+      size_t chunkPos = 0;
+      while (chunkPos < bytesRead) {
+        size_t remaining = bytesRead - chunkPos;
+        size_t bytesWritten = 0;
+        
+        // Use short timeout, don't block forever
+        esp_err_t result = i2s_write(I2S_NUM_0, audioBuffer + chunkPos, remaining, &bytesWritten, 50);
+        
+        if (result == ESP_OK && bytesWritten > 0) {
+          chunkPos += bytesWritten;
+          totalPlayed += bytesWritten;
+        } else {
+          // I2S queue might be full, wait a bit
+          delay(5);  // Very short delay
+          
+          // If we're stuck for too long, give up on this chunk
+          static unsigned long lastProgress = millis();
+          if (millis() - lastProgress > 1000) {
+            Serial.printf("⏭️ Skipping stuck chunk at %u bytes\n", totalPlayed);
+            chunkPos = bytesRead;  // Skip this chunk
+            lastProgress = millis();
+          }
+        }
+      }
+      
+      // Progress every 10KB
+      if (totalRead % 10240 == 0) {
+        float progress = (float)totalRead / dataSize * 100;
+        Serial.printf("📊 %.1f%% read, %u played\n", progress, totalPlayed);
+      }
+      
+      // Small delay to let I2S catch up
+      if (totalRead % 1024 == 0) {
+        delay(1);  // Tiny pause every KB
       }
     }
     
-    unsigned long playbackEnd = millis();
-    float playbackDuration = (playbackEnd - playbackStart) / 1000.0;
+    unsigned long endTime = millis();
+    float actualDuration = (endTime - startTime) / 1000.0;
+    float expectedDuration = (float)dataSize / (playbackRate * numChannels * (bitsPerSample/8));
     
-    Serial.printf("✅ Audio complete: %d samples in %.2f seconds\n", totalSamples, playbackDuration);
-    Serial.printf("📊 Expected duration: %.2f sec, Actual: %.2f sec\n", 
-                  (float)totalSamples / sampleRate, playbackDuration);
+    Serial.printf("✅ Buffered playback complete!\n");
+    Serial.printf("📊 Read: %u, Played: %u bytes in %.2f sec\n", totalRead, totalPlayed, actualDuration);
+    Serial.printf("📊 Expected: %.2f sec (%.1f%% data played)\n", 
+                  expectedDuration, (float)totalPlayed / dataSize * 100);
     
   } else {
     Serial.printf("❌ HTTP Error: %d\n", httpCode);
   }
   
   http.end();
-  
-  // Switch back to microphone mode
+  delay(500);
   setupMicrophoneI2S();
-  
-  Serial.println("🔇 Audio playback finished - back to microphone mode");
+  Serial.println("🔇 Back to microphone mode");
 }
-
 // Create WAV header for the audio data
 void writeWAVHeader(uint8_t* header, int dataSize, int sampleRate) {
   int fileSize = dataSize + 36;
