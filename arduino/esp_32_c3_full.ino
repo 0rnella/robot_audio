@@ -146,7 +146,7 @@ void setupMicrophoneI2S() {
   Serial.println("✅ Microphone I2S initialized!");
 }
 
-void setupAudioI2S() {
+void setupAudioI2S(uint32_t sampleRate = 24000) {
   // Uninstall microphone I2S first
   esp_err_t err = i2s_driver_uninstall(I2S_NUM_0);
   if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
@@ -155,10 +155,12 @@ void setupAudioI2S() {
   
   delay(100); // Give it time to clean up
   
+  Serial.printf("🔧 Setting up I2S for %d Hz playback\n", sampleRate);
+  
   // I2S config for audio output (MAX98357A)
   i2s_config_t i2s_config = {
     .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_TX),
-    .sample_rate = 24000,  // Match OpenAI TTS sample rate
+    .sample_rate = sampleRate,  // Use actual WAV sample rate
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
@@ -465,13 +467,16 @@ void playAudioFromURL(String url) {
     
     // Parse audio format
     int formatStart = fmtPos + 8;
+    uint16_t audioFormat = header[formatStart] | (header[formatStart+1] << 8);
     uint16_t numChannels = header[formatStart+2] | (header[formatStart+3] << 8);
     uint32_t sampleRate = header[formatStart+4] | (header[formatStart+5] << 8) | 
                          (header[formatStart+6] << 16) | (header[formatStart+7] << 24);
+    uint16_t bitsPerSample = header[formatStart+14] | (header[formatStart+15] << 8);
     
-    Serial.printf("📊 Channels: %d, Sample rate: %d Hz\n", numChannels, sampleRate);
+    Serial.printf("📊 Audio format: %d (1=PCM)\n", audioFormat);
+    Serial.printf("📊 Channels: %d, Sample rate: %d Hz, Bits: %d\n", numChannels, sampleRate, bitsPerSample);
     
-    // Find data chunk
+    // Find data chunk and get size
     int dataPos = -1;
     for (int i = fmtPos; i < headerBytesRead - 4; i++) {
       if (header[i] == 'd' && header[i+1] == 'a' && header[i+2] == 't' && header[i+3] == 'a') {
@@ -486,8 +491,12 @@ void playAudioFromURL(String url) {
       return;
     }
     
-    // Setup I2S for audio output
-    setupAudioI2S();
+    uint32_t dataSize = header[dataPos+4] | (header[dataPos+5] << 8) | 
+                       (header[dataPos+6] << 16) | (header[dataPos+7] << 24);
+    Serial.printf("📊 Data size: %d bytes (%.2f seconds expected)\n", dataSize, (float)dataSize / (sampleRate * numChannels * 2));
+    
+    // Setup I2S for audio output with matching sample rate
+    setupAudioI2S(sampleRate);
     
     Serial.println("🎵 Playing audio through MAX98357A...");
     
@@ -500,18 +509,39 @@ void playAudioFromURL(String url) {
     }
     
     // Stream and play audio data
-    uint8_t buffer[512];
+    uint8_t buffer[1024];  // Larger buffer for better streaming
     size_t bytesRead;
     size_t totalSamples = 0;
+    size_t totalBytesStreamed = 0;
+    unsigned long playbackStart = millis();
+    
+    Serial.println("🎵 Starting audio stream...");
     
     while (http.connected() && (bytesRead = stream->readBytes(buffer, sizeof(buffer))) > 0) {
       // Write directly to I2S
-      size_t bytes_written;
-      i2s_write(I2S_NUM_0, buffer, bytesRead, &bytes_written, portMAX_DELAY);
+      size_t bytes_written = 0;
+      esp_err_t result = i2s_write(I2S_NUM_0, buffer, bytesRead, &bytes_written, 1000);
+      
+      if (result != ESP_OK) {
+        Serial.printf("❌ I2S write error: %d\n", result);
+        break;
+      }
+      
+      totalBytesStreamed += bytes_written;
       totalSamples += bytes_written / 2; // 16-bit samples
+      
+      // Debug every 10KB
+      if ((totalBytesStreamed % 10240) == 0) {
+        Serial.printf("📊 Streamed %d bytes, %d samples\n", totalBytesStreamed, totalSamples);
+      }
     }
     
-    Serial.printf("✅ Played %d samples\n", totalSamples);
+    unsigned long playbackEnd = millis();
+    float playbackDuration = (playbackEnd - playbackStart) / 1000.0;
+    
+    Serial.printf("✅ Audio complete: %d samples in %.2f seconds\n", totalSamples, playbackDuration);
+    Serial.printf("📊 Expected duration: %.2f sec, Actual: %.2f sec\n", 
+                  (float)totalSamples / sampleRate, playbackDuration);
     
   } else {
     Serial.printf("❌ HTTP Error: %d\n", httpCode);
