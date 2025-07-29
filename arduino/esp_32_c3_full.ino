@@ -2,32 +2,31 @@
 #include <HTTPClient.h>
 #include <driver/i2s.h>
 #include <ArduinoJson.h>
-#include "AudioFileSourceHTTPStream.h"
-#include "AudioGeneratorMP3.h"
-#include "AudioOutputI2S.h"
 
 // Wi-Fi credentials
 const char* ssid = "pixie";
 const char* password = "ornellaf";
 
-// Proxy server IP + port (adjust to your server)
-const char* server_url = "http://192.168.2.24:5050/upload";
+// Proxy server IP + port
+const char* server_url = "http://192.168.2.54:5050/upload";
 
-// Button pin
+// Pin definitions
 #define BUTTON_PIN 3
-#define LED_PIN 8  // Built-in LED on many ESP32-C3 boards
+#define LED_PIN 8  // Built-in LED
 
-// Simple wiring setup
-#define AUDIO_OUT_PIN 9  // DAC output to PAM8403 L+ input
+// I2S pins for microphone (RX)
+#define MIC_I2S_SD 0    // Serial Data
+#define MIC_I2S_SCK 1   // Serial Clock
+#define MIC_I2S_WS 2    // Word Select
 
-// Mic I2S pins (using tested working pins)
-#define I2S_SD 0   // Serial Data
-#define I2S_WS 2   // Word Select  
-#define I2S_SCK 1  // Serial Clock
+// I2S pins for audio output (TX) - MAX98357A
+#define AUDIO_I2S_DIN 7   // Data to MAX98357A
+#define AUDIO_I2S_BCLK 9  // Bit Clock
+#define AUDIO_I2S_LRC 10  // Left/Right Clock
 
 // Recording settings
 #define SAMPLE_RATE     16000
-#define RECORD_SECONDS  2      // Reduce to 2 seconds to save memory
+#define RECORD_SECONDS  2
 #define SAMPLE_SIZE     2      // 16-bit
 #define BUFFER_SIZE     (SAMPLE_RATE * RECORD_SECONDS * SAMPLE_SIZE)
 
@@ -36,6 +35,7 @@ uint8_t audio_buffer[BUFFER_SIZE];
 // Button state tracking
 bool lastButtonState = HIGH;
 bool recording = false;
+int recording_position = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -44,47 +44,32 @@ void setup() {
   // Setup pins
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
-  pinMode(AUDIO_OUT_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
   Serial.println("🤖 AI Robot Starting Up!");
 
   // Connect Wi-Fi
-  Serial.println("📶 Starting Wi-Fi connection...");
-  
-  // More aggressive Wi-Fi setup for ESP32-C3
   WiFi.persistent(false);
   WiFi.mode(WIFI_OFF);
   delay(100);
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   
-  // Scan for available networks first
-  Serial.println("🔍 Scanning for networks...");
-  int n = WiFi.scanNetworks();
-  Serial.printf("Found %d networks:\n", n);
-  for (int i = 0; i < n; i++) {
-    Serial.printf("%d: %s (Signal: %d dBm)\n", i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i));
-  }
-  Serial.println("🔍 Scan complete\n");
-  
   Serial.print("SSID: ");
   Serial.println(ssid);
   
   WiFi.begin(ssid, password);
   
-  // Try additional ESP32-specific settings
   WiFi.setHostname("ESP32-Robot");
   delay(1000);
   
   Serial.print("📶 Connecting to Wi-Fi");
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {  // 10 second timeout
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
     delay(500); 
     Serial.print(".");
     attempts++;
     
-    // Print status every few attempts
     if (attempts % 4 == 0) {
       Serial.print(" [Status: ");
       Serial.print(WiFi.status());
@@ -103,8 +88,24 @@ void setup() {
     Serial.println("Continuing anyway...");
   }
 
-  // I2S config for ESP32-C3
-  const i2s_config_t i2s_config = {
+  // Initialize I2S for microphone (RX mode)
+  setupMicrophoneI2S();
+  
+  Serial.println("🎤 Microphone ready!");
+  Serial.println("🔘 Press button to record and ask a question!");
+}
+
+void setupMicrophoneI2S() {
+  // First uninstall any existing I2S driver
+  esp_err_t err = i2s_driver_uninstall(I2S_NUM_0);
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    Serial.printf("⚠️ I2S uninstall warning: %d\n", err);
+  }
+  
+  delay(100); // Give it time to clean up
+  
+  // I2S config for microphone input
+  i2s_config_t i2s_config = {
     .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = SAMPLE_RATE,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
@@ -118,27 +119,77 @@ void setup() {
     .fixed_mclk = 0
   };
   
-  const i2s_pin_config_t pin_config = {
-    .bck_io_num = I2S_SCK,
-    .ws_io_num = I2S_WS,
+  i2s_pin_config_t pin_config = {
+    .bck_io_num = MIC_I2S_SCK,
+    .ws_io_num = MIC_I2S_WS,
     .data_out_num = I2S_PIN_NO_CHANGE,
-    .data_in_num = I2S_SD
+    .data_in_num = MIC_I2S_SD
   };
 
-  esp_err_t err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+  err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
   if (err != ESP_OK) {
-    Serial.printf("❌ Failed installing I2S driver: %d\n", err);
-    while (true);
+    Serial.printf("❌ Failed installing microphone I2S driver: %d\n", err);
+    delay(1000); // Wait and try once more
+    err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+    if (err != ESP_OK) {
+      Serial.printf("❌ Microphone I2S install failed again: %d\n", err);
+      return;
+    }
   }
   
   err = i2s_set_pin(I2S_NUM_0, &pin_config);
   if (err != ESP_OK) {
-    Serial.printf("❌ Failed setting I2S pins: %d\n", err);
-    while (true);
+    Serial.printf("❌ Failed setting microphone I2S pins: %d\n", err);
+    return;
   }
 
-  Serial.println("🎤 Microphone ready!");
-  Serial.println("🔘 Press button to record and ask a question!");
+  Serial.println("✅ Microphone I2S initialized!");
+}
+
+void setupAudioI2S() {
+  // Uninstall microphone I2S first
+  esp_err_t err = i2s_driver_uninstall(I2S_NUM_0);
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    Serial.printf("⚠️ Audio I2S uninstall warning: %d\n", err);
+  }
+  
+  delay(100); // Give it time to clean up
+  
+  // I2S config for audio output (MAX98357A)
+  i2s_config_t i2s_config = {
+    .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_TX),
+    .sample_rate = 24000,  // Match OpenAI TTS sample rate
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags = 0,
+    .dma_buf_count = 8,
+    .dma_buf_len = 512,
+    .use_apll = false,
+    .tx_desc_auto_clear = true,
+    .fixed_mclk = 0
+  };
+  
+  i2s_pin_config_t pin_config = {
+    .bck_io_num = AUDIO_I2S_BCLK,
+    .ws_io_num = AUDIO_I2S_LRC,
+    .data_out_num = AUDIO_I2S_DIN,
+    .data_in_num = I2S_PIN_NO_CHANGE
+  };
+
+  err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+  if (err != ESP_OK) {
+    Serial.printf("❌ Failed installing audio I2S driver: %d\n", err);
+    return;
+  }
+  
+  err = i2s_set_pin(I2S_NUM_0, &pin_config);
+  if (err != ESP_OK) {
+    Serial.printf("❌ Failed setting audio I2S pins: %d\n", err);
+    return;
+  }
+
+  Serial.println("✅ Audio I2S initialized!");
 }
 
 void loop() {
@@ -167,9 +218,6 @@ void loop() {
   lastButtonState = currentButtonState;
   delay(10);
 }
-
-// Recording state
-int recording_position = 0;
 
 void startRecording() {
   recording = true;
@@ -231,6 +279,7 @@ void stopRecordingAndProcess() {
   int avg_signal = (sample_count > 0) ? sum / sample_count : 0;
   Serial.printf("🔊 Avg signal level: %d\n", avg_signal);
 
+  Serial.println("🤔 Thinking...");
   Serial.println("✅ Processing complete! Sending to AI...");
 
   // Send to server (use actual recorded size, not full buffer)
@@ -243,6 +292,26 @@ void sendAudioToServer(int actual_data_size) {
     return;
   }
 
+  // Test server connectivity first
+  Serial.println("🔍 Testing server connectivity...");
+  WiFiClient testClient;
+  HTTPClient testHttp;
+  testHttp.begin(testClient, "http://192.168.2.54:5050/health");
+  testHttp.setTimeout(10000);
+  
+  int testResponse = testHttp.GET();
+  Serial.printf("🏥 Health check response: %d\n", testResponse);
+  if (testResponse > 0) {
+    String testReply = testHttp.getString();
+    Serial.println("🏥 Server response: " + testReply);
+  }
+  testHttp.end();
+  
+  if (testResponse <= 0) {
+    Serial.println("❌ Cannot reach server! Check IP address and server status.");
+    return;
+  }
+
   // Check available heap memory
   Serial.printf("🧠 Free heap: %d bytes\n", ESP.getFreeHeap());
 
@@ -250,7 +319,7 @@ void sendAudioToServer(int actual_data_size) {
   HTTPClient http;
   http.begin(client, server_url);
   http.addHeader("Content-Type", "multipart/form-data; boundary=----WebKitFormBoundary");
-  http.setTimeout(60000); // Increase to 60 seconds for TTS processing
+  http.setTimeout(60000); // 60 second timeout for TTS processing
 
   String header = "------WebKitFormBoundary\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n";
   String footer = "\r\n------WebKitFormBoundary--\r\n";
@@ -283,9 +352,6 @@ void sendAudioToServer(int actual_data_size) {
   memcpy(full_body + pos, audio_buffer, actual_data_size);  // Only send recorded data
   pos += actual_data_size;
   memcpy(full_body + pos, footer.c_str(), footer.length());
-
-  // Play "thinking" message before sending
-  Serial.println("🤔 Thinking...");
 
   // Send request
   Serial.println("📤 Sending audio to AI server...");
@@ -357,14 +423,9 @@ void processAIResponse(String reply) {
   }
 }
 
-// Download and play WAV audio using PWM
+// Play audio using MAX98357A I2S amplifier
 void playAudioFromURL(String url) {
-  Serial.println("🔊 Downloading WAV audio from OpenAI...");
-  
-  // Ensure silence first
-  noTone(AUDIO_OUT_PIN);
-  digitalWrite(AUDIO_OUT_PIN, LOW);
-  delay(200);
+  Serial.println("🔊 Downloading and playing WAV audio...");
   
   WiFiClient client;
   HTTPClient http;
@@ -376,11 +437,18 @@ void playAudioFromURL(String url) {
     
     WiFiClient* stream = http.getStreamPtr();
     
-    // Read enough bytes to find the actual header structure
+    // Read enough bytes to parse WAV header
     uint8_t header[100];
     int headerBytesRead = stream->readBytes(header, 100);
     
-    // Find the "fmt " chunk to get audio format info
+    // Parse WAV header to get audio parameters
+    if (header[0] != 'R' || header[1] != 'I' || header[2] != 'F' || header[3] != 'F') {
+      Serial.println("❌ Not a valid WAV file!");
+      http.end();
+      return;
+    }
+    
+    // Find fmt chunk
     int fmtPos = -1;
     for (int i = 0; i < headerBytesRead - 4; i++) {
       if (header[i] == 'f' && header[i+1] == 'm' && header[i+2] == 't' && header[i+3] == ' ') {
@@ -395,35 +463,15 @@ void playAudioFromURL(String url) {
       return;
     }
     
-    Serial.printf("📄 Found fmt chunk at position %d\n", fmtPos);
-    
-    // Parse format chunk (starts 8 bytes after "fmt ")
+    // Parse audio format
     int formatStart = fmtPos + 8;
-    uint16_t audioFormat = header[formatStart] | (header[formatStart+1] << 8);
     uint16_t numChannels = header[formatStart+2] | (header[formatStart+3] << 8);
     uint32_t sampleRate = header[formatStart+4] | (header[formatStart+5] << 8) | 
                          (header[formatStart+6] << 16) | (header[formatStart+7] << 24);
-    uint32_t byteRate = header[formatStart+8] | (header[formatStart+9] << 8) | 
-                       (header[formatStart+10] << 16) | (header[formatStart+11] << 24);
-    uint16_t blockAlign = header[formatStart+12] | (header[formatStart+13] << 8);
-    uint16_t bitsPerSample = header[formatStart+14] | (header[formatStart+15] << 8);
     
-    // Debug the raw bytes being parsed
-    Serial.printf("🔍 Format bytes at pos %d: ", formatStart);
-    for (int i = 0; i < 16; i++) {
-      Serial.printf("%02X ", header[formatStart + i]);
-    }
-    Serial.println();
+    Serial.printf("📊 Channels: %d, Sample rate: %d Hz\n", numChannels, sampleRate);
     
-    // Print actual format info
-    Serial.printf("📊 Audio format: %d (1=PCM)\n", audioFormat);
-    Serial.printf("📊 Channels: %d\n", numChannels);
-    Serial.printf("📊 Sample rate: %d Hz\n", sampleRate);
-    Serial.printf("📊 Byte rate: %d bytes/sec\n", byteRate);
-    Serial.printf("📊 Block align: %d bytes\n", blockAlign);
-    Serial.printf("📊 Bits per sample: %d\n", bitsPerSample);
-    
-    // Find "data" chunk
+    // Find data chunk
     int dataPos = -1;
     for (int i = fmtPos; i < headerBytesRead - 4; i++) {
       if (header[i] == 'd' && header[i+1] == 'a' && header[i+2] == 't' && header[i+3] == 'a') {
@@ -438,138 +486,32 @@ void playAudioFromURL(String url) {
       return;
     }
     
-    Serial.printf("📄 Found data chunk at position %d\n", dataPos);
+    // Setup I2S for audio output
+    setupAudioI2S();
     
-    // Data size is 4 bytes after "data"
-    uint32_t dataSize = header[dataPos+4] | (header[dataPos+5] << 8) | 
-                       (header[dataPos+6] << 16) | (header[dataPos+7] << 24);
+    Serial.println("🎵 Playing audio through MAX98357A...");
     
-    // Debug the data size bytes
-    Serial.printf("🔍 Data size bytes at pos %d: %02X %02X %02X %02X\n", 
-                  dataPos+4, header[dataPos+4], header[dataPos+5], header[dataPos+6], header[dataPos+7]);
-    
-    Serial.printf("📊 Data size: %d bytes (0x%08X)\n", dataSize, dataSize);
-    
-    // Sanity check - if data size is crazy, try to use file size instead
-    if (dataSize > 1000000 || dataSize == 0) {
-      Serial.println("❌ Data size looks wrong! Using HTTP content length instead.");
-      dataSize = http.getSize() - 44; // Approximate: total size minus header
-      Serial.printf("📊 Using estimated data size: %d bytes\n", dataSize);
-    }
-    
-    // Audio data starts 8 bytes after "data"
+    // Skip to audio data
     int audioDataStart = dataPos + 8;
-    Serial.printf("📄 Audio data starts at byte %d\n", audioDataStart);
-    
-    // Calculate timing
-    uint32_t samplePeriodMicros = 1000000 / sampleRate;
-    float expectedDuration = (float)dataSize / (float)byteRate;
-    Serial.printf("📊 Expected duration: %.2f seconds\n", expectedDuration);
-    Serial.printf("⏱️ Sample period: %d microseconds\n", samplePeriodMicros);
-    
-    // Use streaming with small buffer instead of loading everything to memory
-    Serial.println("🎵 Streaming audio with small buffer...");
-    
-    // Skip any remaining header bytes
     int bytesToSkip = audioDataStart - headerBytesRead;
     if (bytesToSkip > 0) {
       uint8_t skipBuffer[bytesToSkip];
       stream->readBytes(skipBuffer, bytesToSkip);
-      Serial.printf("📄 Skipped %d additional header bytes\n", bytesToSkip);
     }
     
-    // Play any audio data from the original header read
-    int sampleCount = 0;
-    unsigned long startMicros = micros();
-    unsigned long playbackStart = millis();
+    // Stream and play audio data
+    uint8_t buffer[512];
+    size_t bytesRead;
+    size_t totalSamples = 0;
     
-    if (bytesToSkip < 0) {
-      int audioFromHeader = headerBytesRead - audioDataStart;
-      Serial.printf("📄 Playing %d audio bytes from header\n", audioFromHeader);
-      
-      for (int i = audioDataStart; i < headerBytesRead; i += 2) {
-        if (i + 1 < headerBytesRead) {
-          int16_t sample = header[i] | (header[i+1] << 8);
-          uint8_t pwmValue = map(sample, -32768, 32767, 100, 155);
-          
-          // Precise timing
-          unsigned long targetTime = startMicros + (sampleCount * samplePeriodMicros);
-          while (micros() < targetTime) { /* wait */ }
-          
-          analogWrite(AUDIO_OUT_PIN, pwmValue);
-          sampleCount++;
-        }
-      }
+    while (http.connected() && (bytesRead = stream->readBytes(buffer, sizeof(buffer))) > 0) {
+      // Write directly to I2S
+      size_t bytes_written;
+      i2s_write(I2S_NUM_0, buffer, bytesRead, &bytes_written, portMAX_DELAY);
+      totalSamples += bytes_written / 2; // 16-bit samples
     }
     
-    // Stream the rest with overlapped download/playback
-    uint8_t buffer1[256];
-    uint8_t buffer2[256];
-    bool useBuffer1 = true;
-    
-    // Download first chunk
-    int bytesRead1 = stream->readBytes(buffer1, sizeof(buffer1));
-    Serial.printf("📥 Downloaded first chunk: %d bytes\n", bytesRead1);
-    
-    int totalBytesProcessed = 0;
-    
-    while (bytesRead1 > 0) {
-      uint8_t* currentBuffer = useBuffer1 ? buffer1 : buffer2;
-      int currentBytes = bytesRead1;
-      
-      Serial.printf("📦 Processing chunk: %d bytes\n", currentBytes);
-      
-      // Start downloading next chunk while playing current one
-      int nextBytes = 0;
-      if (http.connected()) {
-        uint8_t* nextBuffer = useBuffer1 ? buffer2 : buffer1;
-        nextBytes = stream->readBytes(nextBuffer, 256);
-      }
-      
-      // Play current buffer
-      for (int i = 0; i < currentBytes; i += 2) {
-        if (i + 1 < currentBytes) {
-          int16_t sample = currentBuffer[i] | (currentBuffer[i+1] << 8);
-          
-          // Much more sensitive PWM mapping for small audio values
-          uint8_t pwmValue;
-          if (abs(sample) < 20) {
-            // For very quiet samples (silence), use true middle value
-            pwmValue = 127;
-          } else {
-            pwmValue = map(sample, -2000, 2000, 80, 175);
-            pwmValue = constrain(pwmValue, 80, 175);
-          }
-          
-          // Force debug for first few samples of each chunk
-          if (totalBytesProcessed < 1000 && (sampleCount % 10) == 0) {
-            Serial.printf("🔍 Sample %d: raw=%d, pwm=%d\n", sampleCount, sample, pwmValue);
-          }
-          
-          // FASTER timing - skip some waits to speed up playback
-          unsigned long targetTime = startMicros + (sampleCount * (samplePeriodMicros * 7 / 12)); // ~0.58x speed
-          if (micros() < targetTime) {
-            while (micros() < targetTime) { /* wait */ }
-          }
-          
-          analogWrite(AUDIO_OUT_PIN, pwmValue);
-          sampleCount++;
-        }
-      }
-      
-      totalBytesProcessed += currentBytes;
-      
-      // Switch buffers
-      useBuffer1 = !useBuffer1;
-      bytesRead1 = nextBytes;
-    }
-    
-    Serial.printf("📊 Total bytes processed: %d\n", totalBytesProcessed);
-    
-    unsigned long playbackEnd = millis();
-    float actualTime = (playbackEnd - playbackStart) / 1000.0;
-    Serial.printf("✅ Played %d samples in %.2f seconds\n", sampleCount, actualTime);
-    Serial.printf("📊 Expected: %.2f sec, Actual: %.2f sec\n", expectedDuration, actualTime);
+    Serial.printf("✅ Played %d samples\n", totalSamples);
     
   } else {
     Serial.printf("❌ HTTP Error: %d\n", httpCode);
@@ -577,20 +519,10 @@ void playAudioFromURL(String url) {
   
   http.end();
   
-  // FORCE complete silence for the dog!
-  Serial.println("🔇 Forcing complete silence...");
-  noTone(AUDIO_OUT_PIN);           // Stop any tone generation
-  analogWrite(AUDIO_OUT_PIN, 0);   // Set PWM to 0
-  delay(100);
-  digitalWrite(AUDIO_OUT_PIN, LOW); // Set pin to digital LOW
-  delay(100);
+  // Switch back to microphone mode
+  setupMicrophoneI2S();
   
-  // Triple check silence
-  pinMode(AUDIO_OUT_PIN, OUTPUT);
-  digitalWrite(AUDIO_OUT_PIN, LOW);
-  
-  Serial.println("🔇 Pin forced to LOW - should be completely silent now");
-  Serial.println("🐕 Dog-safe mode activated!");
+  Serial.println("🔇 Audio playback finished - back to microphone mode");
 }
 
 // Create WAV header for the audio data
