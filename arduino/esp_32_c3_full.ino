@@ -50,6 +50,17 @@ void setup() {
 
   Serial.println("🤖 AI Robot Starting Up!");
 
+  // Setup wifi manually
+  setupWifiManually();
+
+  // Initialize I2S for microphone (RX mode)
+  setupMicrophoneI2S();
+  
+  Serial.println("🎤 Microphone ready!");
+  Serial.println("🔘 Press button to record and ask a question!");
+}
+
+void setupWifiManually() {
   // Connect Wi-Fi
   WiFi.persistent(false);
   WiFi.mode(WIFI_OFF);
@@ -89,14 +100,7 @@ void setup() {
     Serial.println(WiFi.status());
     Serial.println("Continuing anyway...");
   }
-
-  // Initialize I2S for microphone (RX mode)
-  setupMicrophoneI2S();
-  
-  Serial.println("🎤 Microphone ready!");
-  Serial.println("🔘 Press button to record and ask a question!");
 }
-
 void setupMicrophoneI2S() {
   // First uninstall any existing I2S driver
   esp_err_t err = i2s_driver_uninstall(I2S_NUM_0);
