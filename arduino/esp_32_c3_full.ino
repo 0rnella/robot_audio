@@ -4,11 +4,13 @@
 #include <ArduinoJson.h>
 
 // Wi-Fi credentials
-const char* ssid = "pixie";
-const char* password = "ornellaf";
+
+const char* ssid = "Pixie_n_Friends_Upstairs";
+const char* password = "TastyTr3atz";
 
 // Proxy server IP + port
-const char* server_url = "http://192.168.2.54:5050/upload";
+String server_url = "http://192.168.2.68:5050";
+String upload_url = server_url + "/upload";
 
 // Pin definitions
 #define BUTTON_PIN 3
@@ -298,7 +300,7 @@ void sendAudioToServer(int actual_data_size) {
   Serial.println("🔍 Testing server connectivity...");
   WiFiClient testClient;
   HTTPClient testHttp;
-  testHttp.begin(testClient, "http://192.168.2.54:5050/health");
+  testHttp.begin(testClient, server_url + "/health");
   testHttp.setTimeout(10000);
   
   int testResponse = testHttp.GET();
@@ -310,6 +312,8 @@ void sendAudioToServer(int actual_data_size) {
   testHttp.end();
   
   if (testResponse <= 0) {
+    String testReply = testHttp.getString();
+    Serial.println("test response"+ testReply);
     Serial.println("❌ Cannot reach server! Check IP address and server status.");
     return;
   }
@@ -319,7 +323,7 @@ void sendAudioToServer(int actual_data_size) {
 
   WiFiClient client;
   HTTPClient http;
-  http.begin(client, server_url);
+  http.begin(client, upload_url);
   http.addHeader("Content-Type", "multipart/form-data; boundary=----WebKitFormBoundary");
   http.setTimeout(60000); // 60 second timeout for TTS processing
 
@@ -396,11 +400,11 @@ void processAIResponse(String reply) {
       // Check if there's audio to play
       if (doc.containsKey("has_audio") && doc["has_audio"] == true) {
         String audio_url = doc["audio_url"].as<String>();
-        String full_audio_url = String(server_url).substring(0, String(server_url).lastIndexOf('/')) + audio_url;
+        String full_audio_url = String(upload_url).substring(0, String(upload_url).lastIndexOf('/')) + audio_url;
         
         Serial.println("🔗 Audio URL from server: " + audio_url);
         Serial.println("🔗 Full URL: " + full_audio_url);
-        Serial.println("🔗 Server base: " + String(server_url));
+        Serial.println("🔗 Server base: " + String(upload_url));
         
         playAudioFromURL(full_audio_url);
       } else {
