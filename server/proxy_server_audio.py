@@ -6,9 +6,19 @@ from datetime import datetime
 from dotenv import load_dotenv
 import random
 import io
+import logging
+import sys
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Configure logging for Cloud Run
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -19,6 +29,18 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ROBOT_PROMPT = """The following is a message asked by a child under 12 within the context of a robotics activity. You are a robot created for entertainment purposes. Please answer this message in an entertaining, yet informative way that does not include any profanity and remains age-appropriate. Your response should be short enough to be able to read out within 7 seconds (around 30-40 words max). Be enthusiastic and fun!
 
 Child's question: """
+
+# Root route
+@app.route('/')
+def root():
+    return jsonify({
+        'status': 'AI Robot Server - Cloud Deployed',
+        'endpoints': {
+            'health': '/health',
+            'upload': '/upload',
+            'audio': '/audio/<filename>'
+        }
+    })
 
 # Route to receive audio from ESP32
 @app.route('/upload', methods=['POST'])
@@ -31,10 +53,11 @@ def upload():
 
     # Save locally for debugging
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"debug_audio/debug_audio_{timestamp}.wav"
+    mic_input_audio_dir = "/tmp/mic_input" if os.path.exists("/tmp") else "mic_input"
+    filename = f"{mic_input_audio_dir}/mic_input_{timestamp}.wav"
     
     # Create directory if it doesn't exist
-    os.makedirs("debug_audio", exist_ok=True)
+    os.makedirs(mic_input_audio_dir, exist_ok=True)
     
     with open(filename, "wb") as f:
         f.write(audio_data)
@@ -202,17 +225,17 @@ def text_to_speech(text, timestamp):
         
         if response.status_code == 200:
             # Create audio directory if it doesn't exist
-            os.makedirs("audio_responses", exist_ok=True)
+            audio_dir = "/tmp/audio_responses" if os.path.exists("/tmp") else "audio_responses"
             
             # Save the original audio file first
-            original_filename = f"audio_responses/{timestamp}_original.wav"
+            original_filename = f"{audio_dir}/{timestamp}_original.wav"
             with open(original_filename, 'wb') as f:
                 f.write(response.content)
             
             print(f"🔊 Original TTS audio saved: {original_filename}")
             
             # Convert to 16kHz using ffmpeg (if available) or save as-is
-            final_filename = f"audio_responses/{timestamp}.wav"
+            final_filename = f"{audio_dir}/{timestamp}.wav"
             
             # Try to convert sample rate using ffmpeg
             import subprocess
@@ -279,7 +302,7 @@ def serve_audio(filename):
 # Health check endpoint
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'Robot server is running! 🤖'})
+    return jsonify({'status': 'Robot server is running! 🤖', 'env': 'cloud'})
 
 if __name__ == '__main__':
     # Check if API keys are set
@@ -302,4 +325,5 @@ if __name__ == '__main__':
         print("   macOS: brew install ffmpeg")
         print("   Windows: Download from https://ffmpeg.org/")
     
-    app.run(host='0.0.0.0', port=5050, debug=True)
+    port = int(os.environ.get('PORT', 5050))
+    app.run(host='0.0.0.0', port=port, debug=False)

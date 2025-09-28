@@ -1,5 +1,5 @@
-debug_audio/*
-myrobot-env/*
-audio_responses/*
+server/debug_audio/*
+server/myrobot-env/*
+server/audio_responses/*
 .env
 .DS_Store
