@@ -25,10 +25,16 @@ app = Flask(__name__)
 ASSEMBLYAI_API_KEY = os.getenv("ASSEMBLYAI_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+# Environment detection - use /tmp in production environments (Cloud Run, Docker)
+IS_PRODUCTION = os.getenv("PORT") is not None or os.getenv("K_SERVICE") is not None or os.getenv("GOOGLE_CLOUD_PROJECT") is not None
+
 # Child-friendly robot prompt
 ROBOT_PROMPT = """The following is a message asked by a child under 12 within the context of a robotics activity. You are a robot created for entertainment purposes. Please answer this message in an entertaining, yet informative way that does not include any profanity and remains age-appropriate. Your response should be short enough to be able to read out within 7 seconds (around 30-40 words max). Be enthusiastic and fun!
 
 Child's question: """
+
+# Fun fact prompt
+FUN_FACT_PROMPT = """You are a fun robot sharing interesting facts with children under 12. Generate a single, amazing and age-appropriate fun fact about science, nature, space, animals, or cool technology. Make it exciting and easy to understand! Your response should be short enough to read out within 7 seconds (around 30-40 words max). Start with something like "Hey! Did you know..." or "Here's something amazing..." and be enthusiastic!"""
 
 # Root route
 @app.route('/')
@@ -38,6 +44,7 @@ def root():
         'endpoints': {
             'health': '/health',
             'upload': '/upload',
+            'fun-fact': '/fun-fact',
             'audio': '/audio/<filename>'
         }
     })
@@ -53,7 +60,7 @@ def upload():
 
     # Save locally for debugging
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    mic_input_audio_dir = "/tmp/mic_input" if os.path.exists("/tmp") else "mic_input"
+    mic_input_audio_dir = "/tmp/mic_input" if IS_PRODUCTION else "mic_input"
     filename = f"{mic_input_audio_dir}/mic_input_{timestamp}.wav"
     
     # Create directory if it doesn't exist
@@ -109,12 +116,15 @@ def upload():
             transcript_text = result['text']
             print(f"✅ Transcription: '{transcript_text}'")
             
-            # Step 4: Send to ChatGPT for child-friendly response
+            # Step 4: Handle empty input by generating a fun fact
             if not transcript_text or transcript_text.strip() == "":
+                print("🎲 No speech detected - generating fun fact...")
+                fun_fact_response = generate_fun_fact(is_redirect=True)
                 return jsonify({
                     'text': transcript_text or "[No speech detected]",
-                    'ai_response': "I didn't hear anything! Try speaking a bit louder next time!",
-                    'has_audio': False
+                    'ai_response': fun_fact_response['text'],
+                    'has_audio': fun_fact_response['has_audio'],
+                    'audio_url': fun_fact_response.get('audio_url', '')
                 })
             
             try:
@@ -199,6 +209,90 @@ def get_ai_response(user_question):
         print(f"AI Error: {e}")
         return "Beep boop! Something went wrong in my robot brain!"
 
+def get_fun_fact(is_redirect=False):
+    """Get a fun fact from OpenAI"""
+    if not OPENAI_API_KEY:
+        return "Sorry! I need my AI brain to be connected to share fun facts."
+    
+    # Build the prompt - prepend context if this is a redirect due to no sound
+    prompt = FUN_FACT_PROMPT
+    if is_redirect:
+        prompt = "The child just tried to say something but you couldn't hear them clearly. Start your response by apologizing that you couldn't hear them, then share a fun fact. Use phrases like 'Sorry, I didn't hear you clearly, but here's a fun fact!' or 'Oops, I missed that! Here's something cool instead...' " + prompt
+    
+    try:
+        response = requests.post(
+            'https://api.openai.com/v1/chat/completions',
+            headers={
+                'Authorization': f'Bearer {OPENAI_API_KEY}',
+                'Content-Type': 'application/json'
+            },
+            json={
+                'model': 'gpt-3.5-turbo',
+                'messages': [
+                    {
+                        'role': 'system',
+                        'content': prompt
+                    }
+                ],
+                'max_tokens': 80,
+                'temperature': 0.9  # Higher temperature for more varied fun facts
+            },
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            fun_fact = response.json()['choices'][0]['message']['content'].strip()
+            return fun_fact
+        else:
+            print(f"OpenAI API Error: {response.status_code} - {response.text}")
+            return "Here's a robot fact: I'm powered by electricity and curiosity!"
+            
+    except requests.exceptions.Timeout:
+        return "Here's a quick fact: Did you know robots can think really fast?"
+    except Exception as e:
+        print(f"Fun Fact Error: {e}")
+        return "Fun fact: Robots love learning new things, just like you!"
+
+def generate_fun_fact(is_redirect=False):
+    """Generate a fun fact with audio"""
+    try:
+        print("🎲 Generating fun fact...")
+        fun_fact_text = get_fun_fact(is_redirect)
+        print(f"🎲 Fun Fact: '{fun_fact_text}'")
+        
+        # Generate timestamp for audio file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S") + "_funfact"
+        
+        # Convert fun fact to speech
+        print("🔊 Converting fun fact to speech...")
+        audio_file_path = text_to_speech(fun_fact_text, timestamp)
+        
+        if audio_file_path:
+            return {
+                'text': fun_fact_text,
+                'has_audio': True,
+                'audio_url': f'/audio/{timestamp}.wav'
+            }
+        else:
+            return {
+                'text': fun_fact_text,
+                'has_audio': False
+            }
+            
+    except Exception as e:
+        print(f"❌ Fun Fact Generation Error: {e}")
+        return {
+            'text': "Oops! My fun fact generator is having trouble. Here's one: Robots are awesome!",
+            'has_audio': False
+        }
+
+# Route for getting fun facts directly
+@app.route('/fun-fact', methods=['GET'])
+def fun_fact_endpoint():
+    """Endpoint to get a random fun fact"""
+    fun_fact_response = generate_fun_fact()
+    return jsonify(fun_fact_response)
+
 def text_to_speech(text, timestamp):
     """Convert text to speech using OpenAI TTS - FIXED FOR ESP32"""
     if not OPENAI_API_KEY:
@@ -225,7 +319,8 @@ def text_to_speech(text, timestamp):
         
         if response.status_code == 200:
             # Create audio directory if it doesn't exist
-            audio_dir = "/tmp/audio_responses" if os.path.exists("/tmp") else "audio_responses"
+            audio_dir = "/tmp/audio_responses" if IS_PRODUCTION else "audio_responses"
+            os.makedirs(audio_dir, exist_ok=True)
             
             # Save the original audio file first
             original_filename = f"{audio_dir}/{timestamp}_original.wav"
@@ -280,7 +375,9 @@ def text_to_speech(text, timestamp):
 @app.route('/audio/<filename>')
 def serve_audio(filename):
     try:
-        file_path = f"audio_responses/{filename}"
+        # Use the same directory logic as in text_to_speech function
+        audio_dir = "/tmp/audio_responses" if IS_PRODUCTION else "audio_responses"
+        file_path = f"{audio_dir}/{filename}"
         print(f"🎵 Serving audio file: {file_path}")
         
         # Check if file exists
