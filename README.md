@@ -31,19 +31,24 @@ This project captures audio using an INMP441 microphone connected to an ESP32-C3
 |-------------|----------------|
 | VCC         | 3.3V           |
 | GND         | GND            |
-| WS          | GPIO 7         |
-| SCK         | GPIO 6         |
-| SD          | GPIO 5         |
+| WS          | GPIO 2         |
+| SCK         | GPIO 1         |
+| SD          | GPIO 0         |
 
+### Button and Built-in LED
 
-### LEDs (optional)
+| Component        | ESP32-C3 GPIO |
+|------------------|----------------|
+| Button           | GPIO 3         |
+| Built-in LED     | GPIO 8 (onboard)|
 
-| LED         | GPIO     |
-|-------------|----------|
-| Green       | GPIO 22  |
-| Yellow      | GPIO 23  |
+### Audio Output (MAX98357A) - Optional
 
-Use 220Ω–330Ω resistors in series with LEDs.
+| MAX98357A Pin | ESP32-C3 GPIO |
+|---------------|----------------|
+| DIN           | GPIO 7         |
+| BCLK          | GPIO 9         |
+| LRC           | GPIO 10        |
 
 ---
 
