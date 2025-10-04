@@ -1,12 +1,9 @@
-#include <WiFi.h>
 #include <HTTPClient.h>
 #include <driver/i2s.h>
 #include <ArduinoJson.h>
+#include <WiFiManager.h>
 
-// Wi-Fi credentials
-
-const char* ssid = "Pixie_n_Friends_Upstairs";
-const char* password = "TastyTr3atz";
+WiFiManager wifiManager;
 
 // Proxy server IP + port
 String server_url = "http://192.168.2.68:5050";
@@ -50,9 +47,9 @@ void setup() {
 
   Serial.println("🤖 AI Robot Starting Up!");
 
-  // Setup wifi manually
-  setupWifiManually();
-
+  // Auto-connect or start config portal
+  wifiManager.autoConnect("ESP32-Robot-Setup");
+  
   // Initialize I2S for microphone (RX mode)
   setupMicrophoneI2S();
   
@@ -60,47 +57,33 @@ void setup() {
   Serial.println("🔘 Press button to record and ask a question!");
 }
 
-void setupWifiManually() {
-  // Connect Wi-Fi
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_OFF);
-  delay(100);
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
+void loop() {
+  // Read button state
+  bool currentButtonState = digitalRead(BUTTON_PIN);
   
-  Serial.print("SSID: ");
-  Serial.println(ssid);
+  // Button pressed (falling edge) - start recording
+  if (lastButtonState == HIGH && currentButtonState == LOW) {
+    delay(50); // Debounce
+    startRecording();
+  }
   
-  WiFi.begin(ssid, password);
-  
-  WiFi.setHostname("ESP32-Robot");
-  delay(1000);
-  
-  Serial.print("📶 Connecting to Wi-Fi");
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500); 
-    Serial.print(".");
-    attempts++;
-    
-    if (attempts % 4 == 0) {
-      Serial.print(" [Status: ");
-      Serial.print(WiFi.status());
-      Serial.print("]");
+  // Button released (rising edge) - stop recording
+  if (lastButtonState == LOW && currentButtonState == HIGH) {
+    delay(50); // Debounce
+    if (recording) {
+      stopRecordingAndProcess();
     }
   }
   
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n✅ Wi-Fi connected!");
-    Serial.print("🌐 IP Address: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("\n❌ Wi-Fi connection failed!");
-    Serial.print("Final status: ");
-    Serial.println(WiFi.status());
-    Serial.println("Continuing anyway...");
+  // While recording, keep collecting audio data
+  if (recording) {
+    recordAudioData();
   }
+  
+  lastButtonState = currentButtonState;
+  delay(10);
 }
+
 void setupMicrophoneI2S() {
   // First uninstall any existing I2S driver
   esp_err_t err = i2s_driver_uninstall(I2S_NUM_0);
@@ -198,33 +181,6 @@ void setupAudioI2S(uint32_t sampleRate = 16000) {  // Default to 16kHz
   }
 
   Serial.println("✅ Conservative audio I2S initialized!");
-}
-
-void loop() {
-  // Read button state
-  bool currentButtonState = digitalRead(BUTTON_PIN);
-  
-  // Button pressed (falling edge) - start recording
-  if (lastButtonState == HIGH && currentButtonState == LOW) {
-    delay(50); // Debounce
-    startRecording();
-  }
-  
-  // Button released (rising edge) - stop recording
-  if (lastButtonState == LOW && currentButtonState == HIGH) {
-    delay(50); // Debounce
-    if (recording) {
-      stopRecordingAndProcess();
-    }
-  }
-  
-  // While recording, keep collecting audio data
-  if (recording) {
-    recordAudioData();
-  }
-  
-  lastButtonState = currentButtonState;
-  delay(10);
 }
 
 void startRecording() {
