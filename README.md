@@ -23,7 +23,7 @@ First, we need to give power to everything on our breadboard:
 1. Take a wire and connect the ESP32's **3.3V** pin to the **red (+) strip** on your breadboard
 2. Take another wire and connect the ESP32's **GND** pin to the **blue (-) strip** on your breadboard
 
-*Now your breadboard has power! The red strip gives electricity, the blue strip takes it away.*
+*The red strip gives electricity, the blue strip brings it back to the controller.*
 
 ### Step 2: Connect your speaker to the amplifier 🔊
 1. Connect the speaker's **red (+) wire** to the amplifier's **+ terminal**
