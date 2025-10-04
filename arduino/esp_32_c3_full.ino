@@ -11,7 +11,7 @@ const char* WIFI_SSID = "YourWiFiNetwork";     // Replace with your WiFi name
 const char* WIFI_PASSWORD = "YourWiFiPassword"; // Replace with your WiFi password
 
 // Proxy server IP + port
-String server_url = "http://192.168.2.68:5050";
+String server_url = "https://robot-server-782703035576.europe-west1.run.app";
 String upload_url = server_url + "/upload";
 
 // Pin definitions
