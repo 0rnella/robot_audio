@@ -16,15 +16,6 @@ This project captures audio using an INMP441 microphone connected to an ESP32-C3
 
 ## 🔌 Wiring
 
-### INMP441 to ESP32-WROOM-32
-| INMP441 Pin | ESP32 Pin |
-| ----------- | --------- |
-| VCC         | 3.3V      |
-| GND         | GND       |
-| WS          | GPIO15    |
-| SCK         | GPIO14    |
-| SD          | GPIO32    |
-
 ### INMP441 to ESP32-C3
 
 | INMP441 Pin | ESP32-C3 GPIO |
@@ -40,15 +31,20 @@ This project captures audio using an INMP441 microphone connected to an ESP32-C3
 | Component        | ESP32-C3 GPIO |
 |------------------|----------------|
 | Button           | GPIO 3         |
+| Button (other)   | GND            |
 | Built-in LED     | GPIO 8 (onboard)|
 
-### Audio Output (MAX98357A) - Optional
+### Audio Output (MAX98357A)
 
 | MAX98357A Pin | ESP32-C3 GPIO |
 |---------------|----------------|
+| VCC           | 3.3V           |
+| GND           | GND            |
 | DIN           | GPIO 7         |
 | BCLK          | GPIO 9         |
 | LRC           | GPIO 10        |
+| +             | Speaker (+)    |
+| -             | Speaker (-)    |
 
 ---
 
