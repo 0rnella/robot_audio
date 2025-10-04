@@ -2,8 +2,13 @@
 #include <driver/i2s.h>
 #include <ArduinoJson.h>
 #include <WiFiManager.h>
+#include <WiFi.h>
 
 WiFiManager wifiManager;
+
+// Fixed WiFi credentials to try first
+const char* WIFI_SSID = "YourWiFiNetwork";     // Replace with your WiFi name
+const char* WIFI_PASSWORD = "YourWiFiPassword"; // Replace with your WiFi password
 
 // Proxy server IP + port
 String server_url = "http://192.168.2.68:5050";
@@ -47,8 +52,8 @@ void setup() {
 
   Serial.println("🤖 AI Robot Starting Up!");
 
-  // Auto-connect or start config portal
-  wifiManager.autoConnect("ESP32-Robot-Setup");
+  // Try connecting to fixed WiFi credentials first
+  connectToWiFi();
   
   // Initialize I2S for microphone (RX mode)
   setupMicrophoneI2S();
@@ -82,6 +87,42 @@ void loop() {
   
   lastButtonState = currentButtonState;
   delay(10);
+}
+
+void connectToWiFi() {
+  Serial.println("📶 Attempting to connect to WiFi...");
+  Serial.printf("📶 Trying to connect to: %s\n", WIFI_SSID);
+  
+  // Try to connect with fixed credentials
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  
+  // Wait up to 15 seconds for connection
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println();
+    Serial.println("✅ WiFi connected successfully!");
+    Serial.printf("📍 IP address: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("📶 Signal strength: %d dBm\n", WiFi.RSSI());
+  } else {
+    Serial.println();
+    Serial.println("❌ Failed to connect with fixed credentials");
+    Serial.println("🔧 Starting WiFi configuration portal...");
+    Serial.println("📱 Connect to 'ESP32-Robot-Setup' network to configure WiFi");
+    
+    // Fall back to WiFiManager portal
+    wifiManager.autoConnect("ESP32-Robot-Setup");
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("✅ WiFi configured and connected via portal!");
+      Serial.printf("📍 IP address: %s\n", WiFi.localIP().toString().c_str());
+    }
+  }
 }
 
 void setupMicrophoneI2S() {
