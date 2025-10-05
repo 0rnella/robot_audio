@@ -15,6 +15,8 @@ const char* WIFI_PASSWORD = "ornellaf"; // Replace with your WiFi password
 String server_url = "https://robot-server-782703035576.europe-west1.run.app";
 String upload_url = server_url + "/upload";
 
+WiFiClientSecure testClient;
+
 // Pin definitions
 #define BUTTON_PIN 3
 #define LED_PIN 8  // Built-in LED
@@ -52,6 +54,9 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
 
   Serial.println("🤖 AI Robot Starting Up!");
+
+  // Initialize global SSL client
+  testClient.setInsecure();
 
   // Try connecting to fixed WiFi credentials first
   connectToWiFi();
@@ -300,8 +305,6 @@ void sendAudioToServer(int actual_data_size) {
 
   // Test server connectivity first
   Serial.println("🔍 Testing server connectivity...");
-  WiFiClientSecure testClient;
-  testClient.setInsecure();
   HTTPClient testHttp;
   testHttp.begin(testClient, server_url + "/health");
   testHttp.setTimeout(10000);
@@ -324,8 +327,6 @@ void sendAudioToServer(int actual_data_size) {
   // Check available heap memory
   Serial.printf("🧠 Free heap: %d bytes\n", ESP.getFreeHeap());
 
-  WiFiClientSecure client;
-  client.setInsecure();
   HTTPClient http;
   http.setTimeout(40000);
   
@@ -460,12 +461,9 @@ void playAudioFromURL(String url) {
   // Add a small delay to let the previous HTTP connection fully close
   delay(1000);
   
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(15); // Shorter timeout for audio download
   HTTPClient http;
   
-  if (!http.begin(client, url)) {
+  if (!http.begin(testClient, url)) {
     Serial.println("❌ Failed to begin audio HTTPS connection");
     return;
   }
@@ -475,6 +473,19 @@ void playAudioFromURL(String url) {
   
   int httpCode = http.GET();
   Serial.printf("🎵 Audio GET response code: %d\n", httpCode);
+  
+  // Add detailed error reporting for the audio request
+  if (httpCode == -1) {
+    Serial.println("❌ HTTP_ERROR_CONNECTION_REFUSED or timeout");
+    Serial.printf("🔍 Client connected: %s\n", testClient.connected() ? "Yes" : "No");
+    Serial.printf("🔍 Free heap: %d bytes\n", ESP.getFreeHeap());
+  } else if (httpCode == -11) {
+    Serial.println("❌ HTTP_ERROR_READ_TIMEOUT");
+  } else if (httpCode == -10) {
+    Serial.println("❌ HTTP_ERROR_CONNECTION_LOST");
+  } else if (httpCode < 0) {
+    Serial.printf("❌ HTTP error code: %d\n", httpCode);
+  }
   
   if (httpCode == HTTP_CODE_OK) {
     Serial.printf("✅ HTTP Success, Content-Length: %d bytes\n", http.getSize());
