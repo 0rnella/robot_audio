@@ -3,12 +3,13 @@
 #include <ArduinoJson.h>
 #include <WiFiManager.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 
 WiFiManager wifiManager;
 
 // Fixed WiFi credentials to try first
-const char* WIFI_SSID = "YourWiFiNetwork";     // Replace with your WiFi name
-const char* WIFI_PASSWORD = "YourWiFiPassword"; // Replace with your WiFi password
+const char* WIFI_SSID = "pixie";     // Replace with your WiFi name
+const char* WIFI_PASSWORD = "ornellaf"; // Replace with your WiFi password
 
 // Proxy server IP + port
 String server_url = "https://robot-server-782703035576.europe-west1.run.app";
@@ -299,7 +300,8 @@ void sendAudioToServer(int actual_data_size) {
 
   // Test server connectivity first
   Serial.println("🔍 Testing server connectivity...");
-  WiFiClient testClient;
+  WiFiClientSecure testClient;
+  testClient.setInsecure();
   HTTPClient testHttp;
   testHttp.begin(testClient, server_url + "/health");
   testHttp.setTimeout(10000);
@@ -322,11 +324,20 @@ void sendAudioToServer(int actual_data_size) {
   // Check available heap memory
   Serial.printf("🧠 Free heap: %d bytes\n", ESP.getFreeHeap());
 
-  WiFiClient client;
+  WiFiClientSecure client;
+  client.setInsecure();
   HTTPClient http;
-  http.begin(client, upload_url);
+  http.setTimeout(40000);
+  
+  // Add debugging for HTTPS connection
+  Serial.println("🔗 Attempting HTTPS connection...");
+  if (!http.begin(testClient, server_url + "/upload")) {
+    Serial.println("❌ Failed to begin HTTPS connection");
+    return;
+  }
+  
   http.addHeader("Content-Type", "multipart/form-data; boundary=----WebKitFormBoundary");
-  http.setTimeout(60000); // 60 second timeout for TTS processing
+  Serial.println("✅ HTTPS connection established");
 
   String header = "------WebKitFormBoundary\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n";
   String footer = "\r\n------WebKitFormBoundary--\r\n";
@@ -365,10 +376,20 @@ void sendAudioToServer(int actual_data_size) {
   Serial.println("⏳ This may take 10-20 seconds for transcription + TTS...");
   
   // Send the request (this will block)
+  Serial.println("🚀 Sending POST request...");
   int responseCode = http.POST(full_body, bodyLength);
   String reply = http.getString();
   
   Serial.printf("📬 Response code: %d\n", responseCode);
+  
+  // Add detailed error reporting
+  if (responseCode == -1) {
+    Serial.println("❌ Connection timeout or failed");
+    Serial.printf("🔍 WiFi connected: %s\n", WiFi.status() == WL_CONNECTED ? "Yes" : "No");
+    Serial.printf("🔍 Free heap: %d bytes\n", ESP.getFreeHeap());
+  } else if (responseCode < 0) {
+    Serial.printf("❌ HTTP Error code: %d\n", responseCode);
+  }
   
   if (responseCode == 200) {
     processAIResponse(reply);
@@ -401,7 +422,7 @@ void processAIResponse(String reply) {
       // Check if there's audio to play
       if (doc.containsKey("has_audio") && doc["has_audio"] == true) {
         String audio_url = doc["audio_url"].as<String>();
-        String full_audio_url = String(upload_url).substring(0, String(upload_url).lastIndexOf('/')) + audio_url;
+        String full_audio_url = server_url + audio_url;
         
         Serial.println("🔗 Audio URL from server: " + audio_url);
         Serial.println("🔗 Full URL: " + full_audio_url);
@@ -433,13 +454,28 @@ void processAIResponse(String reply) {
 // Buffered audio playback - read ahead, play in small chunks
 void playAudioFromURL(String url) {
   Serial.println("🔊 Buffered audio streaming...");
+  Serial.println("🎵 Getting audio from: " + url);
+  Serial.printf("🧠 Free heap before audio download: %d bytes\n", ESP.getFreeHeap());
   
-  WiFiClient client;
+  // Add a small delay to let the previous HTTP connection fully close
+  delay(1000);
+  
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(15); // Shorter timeout for audio download
   HTTPClient http;
-  http.begin(client, url);
-  http.setTimeout(30000);
+  
+  if (!http.begin(client, url)) {
+    Serial.println("❌ Failed to begin audio HTTPS connection");
+    return;
+  }
+  
+  http.setTimeout(20000); // Shorter timeout for audio download
+  Serial.println("✅ Audio HTTPS connection established, making GET request...");
   
   int httpCode = http.GET();
+  Serial.printf("🎵 Audio GET response code: %d\n", httpCode);
+  
   if (httpCode == HTTP_CODE_OK) {
     Serial.printf("✅ HTTP Success, Content-Length: %d bytes\n", http.getSize());
     
